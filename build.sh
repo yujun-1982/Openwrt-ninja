@@ -44,6 +44,9 @@ usage() {
   JOBS          make -j 的并行度，默认 nproc
   OPENWRT_DL_DIR / OPENWRT_CCACHE_DIR
                 把 dl/ 与 .ccache/ 指到别处（CI 用来接缓存）
+  GOPROXY       Go 模块代理，默认 https://proxy.golang.org|https://goproxy.cn|direct
+                （用 | 分隔，网络错误时才会降级到下一个源）
+  BUILD_RC      退出码落盘位置，默认 <仓库目录>/build.rc
   COLLECT_ARTIFACTS=1  把产物集中复制到 artifacts/
 EOF
 }
@@ -56,6 +59,26 @@ for arg in "$@"; do
 done
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# 退出码由 build.sh 自己落盘，不依赖调用方怎么起它。
+# （真机踩过：外层用 `bash -c "...; echo $? > make.rc"` 记录，$? 被外层 shell 提前
+#  展开成 0，构建明明失败却把状态写成成功。状态信号说谎比构建失败更严重。）
+BUILD_RC="${BUILD_RC:-${SCRIPT_DIR}/build.rc}"
+_finish() {
+	local rc=$?
+	printf '%s\n' "${rc}" > "${BUILD_RC}" 2>/dev/null || true
+	if [ "${rc}" -ne 0 ]; then
+		echo -e "${RED}build.sh 以退出码 ${rc} 结束 —— 失败，不要当成构建成功。${NC}" >&2
+	fi
+}
+trap _finish EXIT
+
+# PassWall 的 Go 后端（xray-core / sing-box / v2ray-plugin）在 compile 阶段还要去
+# 拉模块，直连 proxy.golang.org 断一下整场构建就废在这里。golang-package.mk 只设
+# GOENV=off、不设 GOPROXY，所以这里注入环境变量有效。用 `|` 而不是 `,`：
+# `,` 只在 404/410 时降级，`|` 在**网络错误**时也会降级到下一个源。
+export GOPROXY="${GOPROXY:-https://proxy.golang.org|https://goproxy.cn|direct}"
+
 OPENWRT_REPO="${OPENWRT_REPO:-https://github.com/openwrt/openwrt.git}"
 # 25.12+ 才是 apk 包管理 + ucode/JS 版 LuCI。不要用更老的稳定分支：
 # 本仓库的 wrapper 包和 .apk 都是按 25.12 的规则写的。
@@ -240,7 +263,7 @@ make defconfig
 info ".config 已展开"
 
 step "Step 6: 校验解析结果"
-"${SCRIPT_DIR}/scripts/verify-config.sh" "${OPENWRT_DIR}/.config"
+"${SCRIPT_DIR}/scripts/verify-config.sh" "${OPENWRT_DIR}/.config" "${SCRIPT_DIR}/seed.config"
 
 echo
 echo -e "${GREEN}环境准备完成。${NC}"
@@ -253,7 +276,19 @@ echo -e "package/install 阶段随其它包一起装进 rootfs，不再有首次
 
 if [ "${BUILD}" = "1" ]; then
 	step "Step 7: 下载源码包"
-	make -j"${JOBS}" download
+	# 传输类失败重试 3 次：真实构建里 v2ray-plugin 就是被一次 proxy.golang.org 的
+	# EOF 打挂的，重试比整场重来便宜得多。（不用 IGNORE_ERRORS 掩盖错误 —— 那是
+	# 另一种"构建成功但固件少东西"。）
+	rc_dl=0
+	for try in 1 2 3; do
+		# 用 && 而不是 if…fi：`if cmd; then …; fi` 在没有分支执行时 $? 会变成 0，
+		# 又是一种"状态说谎"。
+		make -j"${JOBS}" download && { rc_dl=0; break; }
+		rc_dl=$?
+		warn "make download 第 ${try} 次失败（退出码 ${rc_dl}），10 秒后重试"
+		sleep 10
+	done
+	[ "${rc_dl}" -eq 0 ] || { error "make download 连续 3 次失败：先确认这台机器到 GitHub / CDN / Go 代理的网络"; exit 1; }
 
 	step "Step 8: 编译固件"
 	make -j"${JOBS}" V=s

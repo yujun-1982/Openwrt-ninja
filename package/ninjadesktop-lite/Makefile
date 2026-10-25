@@ -30,6 +30,12 @@ VENDOR_SHA256:=753393c796c668d9064c51c0a4f97e0fb6379df776c2302ae1d0edcf6807f91e
 
 include $(INCLUDE_DIR)/package.mk
 
+# 这个包没有可编译的源码：必须覆盖默认的 Build/Compile。
+# 否则框架会执行 `make -C $(PKG_BUILD_DIR)`，而该目录是空的，直接报
+# "No targets specified and no makefile found"（在 .built 阶段 Error 2）。
+define Build/Compile
+endef
+
 # 厂商包 arch = x86_64，正好等于 Package/Default 给的 $(ARCH_PACKAGES)，所以这里
 # 不写 PKGARCH。（要写必须写在 define 内部：Default 会覆盖文件顶部的赋值。）
 define Package/ninjadesktop-lite
@@ -46,32 +52,39 @@ define Package/ninjadesktop-lite/description
 	so it is already installed in the image instead of on first boot.
 endef
 
+# 下面所有 shell 变量/命令替换都写成四个 $，不是笔误：本文件会经
+# $(eval $(call BuildPackage,...)) 展开一次，recipe 执行时再展开第二次。
+# 只写两个 $ 时，第一次展开后就成了 $(...)，被 make 当成变量名，命令替换结果
+# 恒为空（真机表现：校验失败且 "actual:" 后面是空的；install 里的
+# [ -z "$(ls -A ...)" ] 也会永远成立并误报"没解出任何文件"）。
 define Build/Prepare
 	@if [ ! -f "$(VENDOR_APK)" ]; then \
 		echo "ERROR: 找不到预置包 $(VENDOR_APK)"; \
 		echo "       请先在仓库根目录执行 ./build.sh（它建立 openwrt/local-packages 软链）"; \
 		exit 1; \
 	fi
-	@h="$$($(MKHASH) sha256 "$(VENDOR_APK)")"; \
-	if [ "$$h" != "$(VENDOR_SHA256)" ]; then \
+	@h="$$$$($(MKHASH) sha256 "$(VENDOR_APK)")"; \
+	if [ "$$$$h" != "$(VENDOR_SHA256)" ]; then \
 		echo "ERROR: $(PKG_NAME) 预置包校验和不匹配，构建中止"; \
 		echo "  expected: $(VENDOR_SHA256)"; \
-		echo "  actual:   $$h"; \
+		echo "  actual:   $$$$h"; \
 		exit 1; \
 	fi
 endef
 
+# apk extract 必须带 --allow-untrusted：厂商包用我们不知道的密钥签名，
+# 不加这个全局选项会以 "UNTRUSTED signature" 退出 99（要写在 extract 之前）。
 define Package/ninjadesktop-lite/install
 	$(INSTALL_DIR) $(1)
-	$(STAGING_DIR_HOST)/bin/apk extract --destination $(1) "$(VENDOR_APK)"
+	$(STAGING_DIR_HOST)/bin/apk --allow-untrusted extract --destination $(1) "$(VENDOR_APK)"
 	rm -rf $(1)/lib/apk/db
 	@find $(1) -type f | while read -r f; do \
-		case "$$f" in \
-			*/etc/init.d/*|*/usr/bin/*|*/usr/sbin/*|*/usr/libexec/*) chmod 0755 "$$f" ;; \
-			*) head -n 1 "$$f" 2>/dev/null | grep -q '^#!' && chmod 0755 "$$f" ;; \
+		case "$$$$f" in \
+			*/etc/init.d/*|*/usr/bin/*|*/usr/sbin/*|*/usr/libexec/*) chmod 0755 "$$$$f" ;; \
+			*) head -n 1 "$$$$f" 2>/dev/null | grep -q '^#!' && chmod 0755 "$$$$f" ;; \
 		esac; \
 	done; exit 0
-	@if [ -z "$$(ls -A $(1))" ]; then \
+	@if [ -z "$$$$(ls -A $(1))" ]; then \
 		echo "ERROR: apk extract 从 $(VENDOR_APK) 没解出任何文件"; \
 		echo "       多半是这个包不是 25.12 的 APKv4 格式，用 scripts/inspect-local-apks.sh 核对"; \
 		exit 1; \

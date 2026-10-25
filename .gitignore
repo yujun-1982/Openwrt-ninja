@@ -4,6 +4,12 @@
 # 本地构建输出 / CI 下载回来的产物
 /artifacts/
 
+# build.sh 自己记录的退出码（失败与成功都要有可核证的凭据）
+/build.rc
+/defconfig.log
+/prepare.log
+/build.log
+
 # 编辑器和系统垃圾
 .vscode/
 .idea/

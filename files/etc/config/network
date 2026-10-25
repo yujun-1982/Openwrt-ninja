@@ -8,9 +8,6 @@ config device
 	option name 'br-lan'
 	option type 'bridge'
 	list ports 'eth0'
-	# SoftEther's local bridge runs over a TAP; S19softethertaps creates it before
-	# netifd assembles br-lan, because a port that does not exist yet is skipped.
-	list ports 'tap_eth0'
 
 config interface 'lan'
 	option device 'br-lan'

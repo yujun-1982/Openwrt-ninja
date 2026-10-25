@@ -1,0 +1,24 @@
+#!/bin/sh /etc/rc.common
+#
+# 上游 softethervpn5-server 自带的 init 脚本 —— 本固件刻意用这个空实现覆盖它。
+#
+# 为什么：
+#   1) 管理入口是本仓库 feed 的 /etc/init.d/softethervpn（LuCI 可控、配置持久化、
+#      关机 Flush、sysupgrade 保留清单）。上游脚本是 procd 托管的，一旦在开机时
+#      先跑，它会按 /usr/libexec/softethervpn/vpn_server.config 里**上一次刷机前**
+#      留下的 Local Bridge 配置直接拉起 vpnserver —— 于是"这次还没在 Server
+#      Manager 里配过"的机器上也会凭空出现 tap_eth0。
+#   2) 它还会和 feed 的脚本抢同一个 vpnserver 进程 / 同一个数据目录。
+#
+# 为什么不能靠 feed 的 postinst：那段 disable 写在
+#   if [ -z "${IPKG_INSTROOT}" ]; then ... fi
+# 里，只在真机安装时执行；本仓库是编译期装包（IPKG_INSTROOT 非空），不会走那段，
+# 所以必须在 overlay 里把它顶掉。uci-defaults 的那份又要等到 S95done 才跑，
+# 挡不住同一个开机周期里的 S91。
+#
+# 要手动启动服务：/etc/init.d/softethervpn start（或在 LuCI: VPN -> SoftEther VPN）
+#
+START=91
+
+start() { :; }
+stop() { :; }

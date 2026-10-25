@@ -41,7 +41,8 @@ cd local-packages && sha256sum -c SHA256SUMS
   自述依赖 `dnsmasq-full bash curl ca-bundle ip-full jsonfilter ruby ruby-yaml
   kmod-tun unzip`；内含 Lua 时代的 LuCI 页面（`usr/lib/lua/luci/controller/openclash.lua`）
   与 `www/luci-static/resources`、`usr/share/rpcd/acl.d`、`etc/uci-defaults`、
-  `etc/openclash/core`（核心）、`etc/openclash/*`、`usr/share/openclash/*`。
+  `etc/openclash/core`（**空目录**，mihomo 核心不在包里，首次使用需在页面里联网下载）、
+  `etc/openclash/*`、`usr/share/openclash/*`。
 - `ninjadesktop-lite` 1.0.4，arch `x86_64`，license `Proprietary`，
   自述依赖只有 `libc`；内含 `usr/bin/ninja-linux-amd64`、`usr/bin/ninjadesktop-watch`、
   `etc/init.d/ninjadesktop`、`etc/config/ninjadesktop`、`etc/ninja/{geoip,geosite,Country}`
