@@ -1,0 +1,18 @@
+config defaults
+	option input 'ACCEPT'
+	option output 'ACCEPT'
+	option forward 'ACCEPT'
+	option syn_flood '1'
+
+config zone
+	option name 'lan'
+	list network 'lan'
+	option input 'ACCEPT'
+	option output 'ACCEPT'
+	option forward 'ACCEPT'
+	# Official nftables flow offloading (kmod-nft-offload)
+	option flow_offloading '1'
+	option flow_offloading_hw '0'
+
+config include
+	option path '/etc/firewall.user'

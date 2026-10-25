@@ -1,0 +1,36 @@
+#!/bin/sh /etc/rc.common
+
+# START has to be lower than network's S20: netifd assembles br-lan once, and a
+# port listed in /etc/config/network that does not exist yet is silently skipped.
+START=19
+BOOT=1
+
+# SoftEther's local bridge runs over a kernel TAP interface (the ones named
+# tap_* in LuCI's bridge port list). Nothing in OpenWrt creates such an
+# interface at boot: netifd only knows bridge/vlan/dummy style devices, and the
+# TAP SoftEther opened the first time is gone after a reboot. So the bridge
+# entry survives in vpn_server.config while the interface it points at does not,
+# which looks exactly like "the tap device and its bridge disappeared".
+#
+# Create whatever /etc/config/network already refers to, before network starts.
+
+create_missing_taps() {
+	names=$(uci -q show network 2>/dev/null | grep -ao "'tap[^']*'" | tr -d "'" | sort -u)
+
+	for t in ${names}; do
+		if ip link show "${t}" >/dev/null 2>&1; then
+			continue
+		fi
+		ip tuntap add dev "${t}" mode tap >/dev/null 2>&1 &&
+			ip link set "${t}" up >/dev/null 2>&1 &&
+			logger -t softethertaps "created ${t}"
+	done
+}
+
+start() {
+	create_missing_taps
+}
+
+boot() {
+	start
+}

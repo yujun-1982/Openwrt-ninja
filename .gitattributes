@@ -1,0 +1,23 @@
+# 行尾：shell 脚本、UCI overlay、Makefile 必须是 LF。
+# 在 Windows 上 core.autocrlf=true 的检出会把它们改成 CRLF，
+# 结果就是 init/uci-defaults 脚本执行不了、uhttpd/UCI 解析配置失败。
+*.sh                text eol=lf
+files/**            text eol=lf
+package/**          text eol=lf
+scripts/**          text eol=lf
+seed.config         text eol=lf
+*.conf              text eol=lf
+*.mk                text eol=lf
+Makefile            text eol=lf
+*.json              text eol=lf
+*.yml               text eol=lf
+SHA256SUMS          text eol=lf
+.gitignore          text eol=lf
+.gitattributes      text eol=lf
+
+# 本地现成插件包是二进制，绝不能让 git 当文本处理（里面真的会出现 CR/LF 字节）。
+# -diff/-merge 顺带避免 GitHub 把它们当大文本算进 diff。
+*.apk               binary
+*.ipk               binary
+*.img               binary
+*.gz                binary

@@ -1,0 +1,18 @@
+# build.sh 准备的官方 OpenWrt 源码树（巨大，永不提交）
+/openwrt/
+
+# 本地构建输出 / CI 下载回来的产物
+/artifacts/
+
+# 编辑器和系统垃圾
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+*.log
+
+# 注意：local-packages/*.apk 是**故意提交**的。
+# 这两个包只有预编译产物、没有可编译源码，是这套固件的组成部分。
+# 单个文件超过 100 MB 时才需要 Git LFS：git lfs track "*.apk"
+# （当前两个文件分别约 7.7 MiB 与 39.8 MiB，直接提交即可。）

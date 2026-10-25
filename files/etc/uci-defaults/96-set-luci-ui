@@ -1,0 +1,37 @@
+#!/bin/sh
+#
+# 96-set-luci-ui - Simplified Chinese + Argon, without replacing luci-base's
+# own configuration.
+#
+# This used to be an overlay file at files/etc/config/luci. Overlay files
+# replace the packaged file wholesale instead of merging, so it silently
+# dropped resourcebase, ubuspath, the sauth session settings, ccache and the
+# apply/rollback block. Missing resourcebase alone was enough to break every
+# JS view: the page asked for /luci.js (404) instead of
+# /luci-static/resources/luci.js, so LuCI stayed on "loading view" forever.
+#
+# Runs once on first boot and is then deleted by the uci-defaults framework.
+#
+
+LOG='/tmp/uci-defaults-96-set-luci-ui.log'
+
+{
+	echo "=== $(date) 96-set-luci-ui ==="
+
+	uci -q set luci.main.lang='zh_cn'
+	uci -q set luci.main.mediaurlbase='/luci-static/argon'
+	uci -q commit luci
+
+	echo "lang          = $(uci -q get luci.main.lang)"
+	echo "mediaurlbase  = $(uci -q get luci.main.mediaurlbase)"
+
+	# These must survive from the packaged defaults - do not set them here.
+	echo "resourcebase  = $(uci -q get luci.main.resourcebase)"
+	echo "ubuspath      = $(uci -q get luci.main.ubuspath)"
+	echo "sauth.path    = $(uci -q get luci.sauth.sessionpath)"
+
+	[ "$(uci -q get luci.main.resourcebase)" = "/luci-static/resources" ] ||
+		echo "WARN: resourcebase missing - JS views will hang on 'loading view'"
+} > "${LOG}" 2>&1
+
+exit 0
