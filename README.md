@@ -15,7 +15,7 @@ sudo apt-get install -y build-essential clang bison flex g++-multilib gcc-multil
   git git-svn libncurses5-dev libssl-dev libelf-dev python3 python3-setuptools \
   rsync swig unzip zlib1g-dev file wget gettext ccache subversion
 
-git clone https://github.com/<你>/Openwrt-ninja.git
+git clone https://github.com/yujun-1982/Openwrt-ninja.git
 cd Openwrt-ninja
 ./build.sh                      # 准备源码树 / feed / .config / overlay + 校验
 cd openwrt && make -j$(nproc) V=s
