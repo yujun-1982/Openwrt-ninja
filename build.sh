@@ -46,6 +46,9 @@ usage() {
                 把 dl/ 与 .ccache/ 指到别处（CI 用来接缓存）
   GOPROXY       Go 模块代理，默认 https://proxy.golang.org|https://goproxy.cn|direct
                 （用 | 分隔，网络错误时才会降级到下一个源）
+  CARGO_CRATES_MIRROR
+                Rust crates 源，默认 sparse+https://rsproxy.cn/index/
+                （shadowsocks-rust 等 Rust 包编译期要拉 crate；置空 = 直连 crates.io）
   BUILD_RC      退出码落盘位置，默认 <仓库目录>/build.rc
   COLLECT_ARTIFACTS=1  把产物集中复制到 artifacts/
 EOF
@@ -78,6 +81,76 @@ trap _finish EXIT
 # GOENV=off、不设 GOPROXY，所以这里注入环境变量有效。用 `|` 而不是 `,`：
 # `,` 只在 404/410 时降级，`|` 在**网络错误**时也会降级到下一个源。
 export GOPROXY="${GOPROXY:-https://proxy.golang.org|https://goproxy.cn|direct}"
+
+# 同一个坑的上一层：PassWall 的 shadowsocks-rust 是 Rust 包，rust-package.mk 在 compile
+# 阶段还要让 cargo 去 crates.io 取 crate。国内网络直连时 TLS 握手会被中途掐断，cargo
+# （libcurl）报
+#   [35] SSL connect error (TLS connect error: ...unexpected eof while reading)
+# 然后带着 cargo 自己的退出码 101 结束，整场构建就挂在
+#   "shadowsocks-rust failed to build" / ".built] Error 101"
+# 上。101 不是源码编译错误，是 cargo 认输的退出码。
+#
+# cargo 的"源替换"只能写在 config.toml 里（没有等价的环境变量），所以下面把镜像落到
+# 源码树里 cargo 一定会读到的地方。置空（CARGO_CRATES_MIRROR=）表示直连 crates.io。
+CARGO_CRATES_MIRROR="${CARGO_CRATES_MIRROR:-sparse+https://rsproxy.cn/index/}"
+
+# 写 $(TOPDIR)/.cargo/config.toml 和 $(DL_DIR)/cargo/config.toml。
+# 两处都要写，因为 cargo 认配置的位置不止一个，而 rust-package.mk 的 CARGO_HOME 在
+# 不同版本里不一样（老版本指包内 .cargo，新版本指 dl/cargo）：
+#   * cargo 从 CWD（= PKG_BUILD_DIR，在 openwrt/ 下面）一路向上找 .cargo/config.toml，
+#     所以 $(TOPDIR)/.cargo/config.toml 对每个 Rust 包都生效；
+#   * $CARGO_HOME/config.toml 优先级最低，写进 dl/cargo 是为了 CARGO_HOME=$(DL_DIR)/cargo
+#     的那套 Makefile，顺带让这份配置跟着 dl/ 的缓存一起进 CI。
+# 两份内容一样；$2 为空（dl 还没建）就只写第一处。
+setup_cargo_mirror() {
+	local topdir="$1"
+	local dldir="${2:-}"
+
+	_emit_cargo_cfg() {
+		cat <<EOF
+# 由 Openwrt-ninja/build.sh 生成，重跑 build.sh 会覆盖；换源用 CARGO_CRATES_MIRROR=
+[source.crates-io]
+replace-with = "ninja-mirror"
+
+[source.ninja-mirror]
+registry = "${CARGO_CRATES_MIRROR}"
+
+[net]
+# 一次 RST 不要毁掉整次构建
+retry = 10
+git-fetch-with-cli = true
+
+[http]
+# 中间设备对 HTTP/2 连接复用很敏感，关掉以后单个连接出错只影响那一个请求
+multiplexing = false
+timeout = 120
+EOF
+	}
+
+	_apply_cargo_cfg() {
+		local dir="$1"
+		mkdir -p "${dir}"
+		_emit_cargo_cfg > "${dir}/config.toml"
+	}
+
+	if [ -z "${CARGO_CRATES_MIRROR}" ]; then
+		local dirs=("${topdir}/.cargo")
+		local d
+		[ -z "${dldir}" ] || dirs+=("${dldir}/cargo")
+		# 只删自己生成的那份；用户手写的配置不动
+		for d in "${dirs[@]}"; do
+			[ -f "${d}/config.toml" ] || continue
+			grep -q 'Openwrt-ninja/build.sh' "${d}/config.toml" || continue
+			rm -f "${d}/config.toml"
+			rmdir "${d}" 2>/dev/null || true
+		done
+		warn "CARGO_CRATES_MIRROR 为空：cargo 直连 crates.io（国内网络大概率失败）"
+		return 0
+	fi
+
+	_apply_cargo_cfg "${topdir}/.cargo"
+	[ -z "${dldir}" ] || _apply_cargo_cfg "${dldir}/cargo"
+}
 
 OPENWRT_REPO="${OPENWRT_REPO:-https://github.com/openwrt/openwrt.git}"
 # 25.12+ 才是 apk 包管理 + ucode/JS 版 LuCI。不要用更老的稳定分支：
@@ -169,6 +242,12 @@ if [ -n "${OPENWRT_CCACHE_DIR:-}" ]; then
 	ln -sfn "${OPENWRT_CCACHE_DIR}" "${OPENWRT_DIR}/.ccache"
 	info "openwrt/.ccache -> ${OPENWRT_CCACHE_DIR}"
 fi
+
+# Rust 包（shadowsocks-rust）的 cargo 源，理由见上面 CARGO_CRATES_MIRROR 的注释。
+# 放在这里而不是 Step 7：手动 `cd openwrt && make` 也要吃到这份配置。
+# dl/ 此时已经指向最终的下载目录（上面可能刚软链过），配置跟着缓存走。
+setup_cargo_mirror "${OPENWRT_DIR}" "${OPENWRT_DIR}/dl"
+info "cargo 源 = ${CARGO_CRATES_MIRROR:-<直连 crates.io>}"
 
 if git -C "${SCRIPT_DIR}" rev-parse --short HEAD >/dev/null 2>&1; then
 	info "配置仓库 = $(git -C "${SCRIPT_DIR}" rev-parse --short HEAD) ($(git -C "${SCRIPT_DIR}" log -1 --format=%s | cut -c1-60))"

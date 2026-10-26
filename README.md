@@ -4,6 +4,16 @@ OpenWrt **25.12** x86/64 定制固件的构建配置仓库。官方 OpenWrt 源�
 `seed.config` + `files/` overlay + 额外 feed 注入；两个只有预编译产物的插件包通过
 `package/` 里的 wrapper 接进 OpenWrt 自己的包体系。
 
+结构来自这两个参考仓库，并按下面的要求做了改动：
+
+- 参考 [yujun-1982/LEDE-ni](https://github.com/yujun-1982/LEDE-ni)（`build.sh` + `seed.config` + `files/` 的写法与踩坑记录）
+- 参考 [yujun-1982/OpenWrt](https://github.com/yujun-1982/OpenWrt)（`local-packages/` + Actions 手动触发）
+- **`luci-app-openclash-1.0.0-r1.apk` 与 `ninjadesktop-lite-1.0.4-x86_64.apk` 在编译完成后就已经装上**，不再有首次开机安装的 uci-defaults 脚本
+- SoftEther 的 LuCI 页面改用外部 feed：`src-git softethervpn https://github.com/yujun-1982/luci-app-softethervpn.git`
+- 逐条核实预置包的依赖在当前分支的真实包名（结论见下）
+
+一条本地命令即可编译，也可以只在 GitHub Actions 上手动触发，两边跑的是同一个 `build.sh`。
+
 ---
 
 ## 1. 本地 Ubuntu 编译
@@ -15,7 +25,7 @@ sudo apt-get install -y build-essential clang bison flex g++-multilib gcc-multil
   git git-svn libncurses5-dev libssl-dev libelf-dev python3 python3-setuptools \
   rsync swig unzip zlib1g-dev file wget gettext ccache subversion
 
-git clone https://github.com/yujun-1982/Openwrt-ninja.git
+git clone https://github.com/<你>/Openwrt-ninja.git
 cd Openwrt-ninja
 ./build.sh                      # 准备源码树 / feed / .config / overlay + 校验
 cd openwrt && make -j$(nproc) V=s
@@ -31,6 +41,19 @@ cd openwrt && make -j$(nproc) V=s
 
 ```bash
 OPENWRT_REF=v25.12.6 ./build.sh --build
+```
+
+Rust 包（PassWall 的 `shadowsocks-rust`）在编译期还要让 cargo 去 crates.io 拉 crate，国内网络
+直连会在 TLS 握手时被掐断，cargo 报 `[35] SSL connect error (... unexpected eof while reading)`
+并以 **101** 退出，看起来像 `shadowsocks-rust` 编译失败，其实是网络。`build.sh` 会把 cargo
+源换成 rsproxy 镜像（写入 `openwrt/.cargo/config.toml`），要换别的镜像或直连：
+
+```bash
+# 换镜像（USTC / TUNA / SJTU 都行）
+CARGO_CRATES_MIRROR=sparse+https://mirrors.ustc.edu.cn/crates.io-index/ ./build.sh --build
+
+# 直连 crates.io（不再写 config.toml）
+CARGO_CRATES_MIRROR= ./build.sh --build
 ```
 
 产物：
@@ -329,6 +352,7 @@ vpnserver。要起服务请用 `/etc/init.d/softethervpn start` 或 LuCI 的 **V
 | `找不到预置包 $(TOPDIR)/local-packages/...` | `ls -l openwrt/local-packages` | 忘了跑 `./build.sh`：它建立这个软链 |
 | `apk extract` 报错 | 该步骤的日志 | 说明厂商包不是 25.12 的 APKv4。用 `scripts/inspect-local-apks.sh` 导出的元数据核对，或找厂商要对应 25.12 的包 |
 | 固件里没有插件 | `*.manifest`、`scripts/verify-image.sh` | manifest 由 rootfs 的 apk 数据库生成，是最权威的判据 |
+| `shadowsocks-rust failed to build` + `[35] SSL connect error` | `openwrt/.cargo/config.toml`（和 `openwrt/dl/cargo/config.toml`） | cargo 拉 crate 时 TLS 握手被掐断（`unexpected eof while reading`）。**101 是 cargo 的退出码，不是源码编译错误**。`build.sh` 会把源换成 rsproxy 镜像；手工 `cd openwrt && make` 之前先跑一遍 `./build.sh`，否则不会有这份 config.toml。换镜像/直连见 §1 的 `CARGO_CRATES_MIRROR` |
 | LuCI 页面停在"加载视图中" | `/tmp/uci-defaults-96-set-luci-ui.log` | `luci.main.resourcebase` 被弄丢了。**教训：`files/etc/config/<x>` 是整文件替换**，会连带删掉打包默认值；改配置优先用 uci-defaults 里的 `uci set` |
 | 脚本执行不了 / UCI 解析失败 | 文件行尾 | 在 Windows 上检出被转成 CRLF 了；`.gitattributes` 已钉 LF，若仍出问题检查编辑器设置 |
 | feed force-push 导致 overlay 没生效 | `build.sh` Step 2 的 warn | 脚本会把分叉的 feed 对齐到上游，再继续走 defconfig |
