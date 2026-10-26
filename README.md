@@ -4,16 +4,6 @@ OpenWrt **25.12** x86/64 定制固件的构建配置仓库。官方 OpenWrt 源�
 `seed.config` + `files/` overlay + 额外 feed 注入；两个只有预编译产物的插件包通过
 `package/` 里的 wrapper 接进 OpenWrt 自己的包体系。
 
-结构来自这两个参考仓库，并按下面的要求做了改动：
-
-- 参考 [yujun-1982/LEDE-ni](https://github.com/yujun-1982/LEDE-ni)（`build.sh` + `seed.config` + `files/` 的写法与踩坑记录）
-- 参考 [yujun-1982/OpenWrt](https://github.com/yujun-1982/OpenWrt)（`local-packages/` + Actions 手动触发）
-- **`luci-app-openclash-1.0.0-r1.apk` 与 `ninjadesktop-lite-1.0.4-x86_64.apk` 在编译完成后就已经装上**，不再有首次开机安装的 uci-defaults 脚本
-- SoftEther 的 LuCI 页面改用外部 feed：`src-git softethervpn https://github.com/yujun-1982/luci-app-softethervpn.git`
-- 逐条核实预置包的依赖在当前分支的真实包名（结论见下）
-
-一条本地命令即可编译，也可以只在 GitHub Actions 上手动触发，两边跑的是同一个 `build.sh`。
-
 ---
 
 ## 1. 本地 Ubuntu 编译
