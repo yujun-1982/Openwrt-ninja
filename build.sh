@@ -341,6 +341,47 @@ step "Step 5: 展开依赖 make defconfig"
 make defconfig
 info ".config 已展开"
 
+# ------------------------------------------------------------
+step "Step 5b: 生成 apk 运行时源列表"
+# base-files 在装包阶段会按 feeds.conf 里的**所有** feed 生成
+# /etc/apk/repositories.d/distfeeds.list。本仓库额外挂的 passwall /
+# passwall_packages / timecontrol / softethervpn / custom 只是编译期 feed，
+# 官方服务器上没有对应目录，照抄生成出来就是 404
+# （apk update 报 wget error 8 + unexpected end of file）。
+# 这些包已经编进固件，运行时不需要它们各自的 feed，所以按 .config 里的真实
+# 变量重新生成一份，靠 files/ overlay 顶掉 base-files 自动生成的那份。
+ver_repo=$(sed -n 's/^CONFIG_VERSION_REPO="\(.*\)"$/\1/p' .config | head -n1)
+board=$(sed -n 's/^CONFIG_TARGET_BOARD="\(.*\)"$/\1/p' .config | head -n1)
+subtarget=$(sed -n 's/^CONFIG_TARGET_SUBTARGET="\(.*\)"$/\1/p' .config | head -n1)
+# ARCH_PACKAGES 不是 .config 里的符号（它是 include/target.mk 的 make 变量），
+# 从 make defconfig 顺带生成的 tmp/.targetinfo 里按 Target 取。
+arch_pkgs=$(awk -v t="${board}/${subtarget}" '
+	/^Target: / { cur = $2 }
+	cur == t && /^Target-Arch-Packages: / { print $2; exit }
+' tmp/.targetinfo 2>/dev/null)
+if [ -z "${arch_pkgs}" ]; then
+	arch_pkgs=$(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\(.*\)"$/\1/p' .config | head -n1)
+fi
+if [ -z "${ver_repo}" ] || [ -z "${arch_pkgs}" ] || [ -z "${board}" ] || [ -z "${subtarget}" ]; then
+	error "取不到 CONFIG_VERSION_REPO / CONFIG_TARGET_* / ARCH_PACKAGES（tmp/.targetinfo 是否存在？）"
+	exit 1
+fi
+mkdir -p "${OPENWRT_DIR}/files/etc/apk/repositories.d"
+{
+	echo "# 由 build.sh Step 5b 生成：只保留官方 feed，避免第三方 feed 的 404"
+	echo "${ver_repo}/targets/${board}/${subtarget}/packages/packages.adb"
+	for f in base luci packages routing telephony video; do
+		echo "${ver_repo}/packages/${arch_pkgs}/${f}/packages.adb"
+	done
+} > "${OPENWRT_DIR}/files/etc/apk/repositories.d/distfeeds.list"
+{
+	echo "# PassWall 官方 apk 构建（SourceForge），公钥在 /etc/apk/keys/apk.pub"
+	echo "# 缺公钥会报 UNTRUSTED signature；索引本身是签过名的"
+	echo "https://downloads.sourceforge.net/project/openwrt-passwall-build/releases/packages-25.12/${arch_pkgs}/passwall_luci/packages.adb"
+	echo "https://downloads.sourceforge.net/project/openwrt-passwall-build/releases/packages-25.12/${arch_pkgs}/passwall_packages/packages.adb"
+} > "${OPENWRT_DIR}/files/etc/apk/repositories.d/customfeeds.list"
+info "distfeeds.list: ${ver_repo}/targets/${board}/${subtarget} (${arch_pkgs})"
+
 step "Step 6: 校验解析结果"
 "${SCRIPT_DIR}/scripts/verify-config.sh" "${OPENWRT_DIR}/.config" "${SCRIPT_DIR}/seed.config"
 
