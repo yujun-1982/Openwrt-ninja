@@ -358,24 +358,49 @@ step "Step 5b: 生成 apk 运行时源列表"
 # passwall_packages / timecontrol / softethervpn / custom 只是编译期 feed，
 # 官方服务器上没有对应目录，照抄生成出来就是 404
 # （apk update 报 wget error 8 + unexpected end of file）。
-# 这些包已经编进固件，运行时不需要它们各自的 feed，所以按 .config 里的真实
-# 变量重新生成一份，靠 files/ overlay 顶掉 base-files 自动生成的那份。
-ver_repo=$(sed -n 's/^CONFIG_VERSION_REPO="\(.*\)"$/\1/p' .config | head -n1)
+# 这些包已经编进固件，运行时不需要它们各自的 feed，所以重新生成一份，靠
+# files/ overlay 顶掉 base-files 自动生成的那份。
+#
+# 取值不是单一来源：CONFIG_VERSION_REPO **不是** Kconfig 符号，正常构建的 .config
+# 里根本没有它（include/version.mk 用空值兜底），第一版就是栽在这里。按下面的
+# 顺序退让，每一层都实测过：
+#   VERSION_REPO    : include/version.mk 的默认值（跟随当前 ref，最准）
+#                   -> .config 的 CONFIG_VERSION_REPO（有人手动设过才有）
+#                   -> 由 OPENWRT_REF 的 vX.Y.Z 推导
+#   BOARD/SUBTARGET : .config 的 CONFIG_TARGET_*（一定有）
+#   ARCH_PACKAGES   : tmp/.targetinfo 的 Target-Arch-Packages
+#                   -> .config 的 CONFIG_TARGET_ARCH_PACKAGES / CONFIG_ARCH_PACKAGES
+#                   -> x86 兜底 x86_64
+[ -f tmp/.targetinfo ] || make -s prepare-tmpinfo >/dev/null 2>&1 || true
+
+ver_repo=$(sed -n 's|^VERSION_REPO:=.*,\(https\?://[^)]*\))$|\1|p' include/version.mk 2>/dev/null | head -n1)
+if [ -z "${ver_repo}" ]; then
+	ver_repo=$(sed -n 's/^CONFIG_VERSION_REPO="\(.*\)"$/\1/p' .config | head -n1)
+fi
+if [ -z "${ver_repo}" ]; then
+	case "${OPENWRT_REF}" in
+		v[0-9]*) ver_repo="https://downloads.openwrt.org/releases/${OPENWRT_REF#v}" ;;
+	esac
+fi
+
 board=$(sed -n 's/^CONFIG_TARGET_BOARD="\(.*\)"$/\1/p' .config | head -n1)
 subtarget=$(sed -n 's/^CONFIG_TARGET_SUBTARGET="\(.*\)"$/\1/p' .config | head -n1)
-# ARCH_PACKAGES 不是 .config 里的符号（它是 include/target.mk 的 make 变量），
-# 从 make defconfig 顺带生成的 tmp/.targetinfo 里按 Target 取。
+
 arch_pkgs=$(awk -v t="${board}/${subtarget}" '
 	/^Target: / { cur = $2 }
 	cur == t && /^Target-Arch-Packages: / { print $2; exit }
 ' tmp/.targetinfo 2>/dev/null)
-if [ -z "${arch_pkgs}" ]; then
-	arch_pkgs=$(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\(.*\)"$/\1/p' .config | head -n1)
-fi
+[ -n "${arch_pkgs}" ] || arch_pkgs=$(sed -n 's/^CONFIG_TARGET_ARCH_PACKAGES="\(.*\)"$/\1/p' .config | head -n1)
+[ -n "${arch_pkgs}" ] || arch_pkgs=$(sed -n 's/^CONFIG_ARCH_PACKAGES="\(.*\)"$/\1/p' .config | head -n1)
+[ -n "${arch_pkgs}" ] || [ "${board}" != "x86" ] || arch_pkgs="x86_64"
+
 if [ -z "${ver_repo}" ] || [ -z "${arch_pkgs}" ] || [ -z "${board}" ] || [ -z "${subtarget}" ]; then
-	error "取不到 CONFIG_VERSION_REPO / CONFIG_TARGET_* / ARCH_PACKAGES（tmp/.targetinfo 是否存在？）"
+	error "源列表参数不全：ver_repo='${ver_repo}' board='${board}' subtarget='${subtarget}' arch='${arch_pkgs}'"
 	exit 1
 fi
+info "版本仓库 = ${ver_repo}"
+info "目标 = ${board}/${subtarget}   ARCH_PACKAGES = ${arch_pkgs}"
+
 mkdir -p "${OPENWRT_DIR}/files/etc/apk/repositories.d"
 {
 	echo "# 由 build.sh Step 5b 生成：只保留官方 feed，避免第三方 feed 的 404"
