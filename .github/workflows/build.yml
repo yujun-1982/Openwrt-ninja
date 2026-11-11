@@ -12,12 +12,12 @@ on:
       openwrt_ref:
         description: "OpenWrt 分支或 tag"
         required: true
-        default: "openwrt-25.12"
+        default: "v25.12.6"
         type: choice
         options:
-          - openwrt-25.12
           - v25.12.6
           - v25.12.0
+          - openwrt-25.12
           - master
       jobs:
         description: "make -j（runner 4 核 16G，3 比较稳）"

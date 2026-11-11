@@ -1,7 +1,11 @@
 #!/bin/sh
 #
-# 96-set-luci-ui - Simplified Chinese + Argon, without replacing luci-base's
-# own configuration.
+# 96-set-luci-ui - Simplified Chinese + Vantage theme, without replacing
+# luci-base's own configuration.
+#
+# Argon（luci-theme-argon）仍然装着，随时可以在 系统 -> 系统 -> 语言和界面
+# 里切回去；这里只是把默认主题设成 Vantage。要改回 Argon 就把下面
+# mediaurlbase 改成 /luci-static/argon。
 #
 # This used to be an overlay file at files/etc/config/luci. Overlay files
 # replace the packaged file wholesale instead of merging, so it silently
@@ -19,7 +23,7 @@ LOG='/tmp/uci-defaults-96-set-luci-ui.log'
 	echo "=== $(date) 96-set-luci-ui ==="
 
 	uci -q set luci.main.lang='zh_cn'
-	uci -q set luci.main.mediaurlbase='/luci-static/argon'
+	uci -q set luci.main.mediaurlbase='/luci-static/vantage'
 	uci -q commit luci
 
 	echo "lang          = $(uci -q get luci.main.lang)"

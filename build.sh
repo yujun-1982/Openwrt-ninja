@@ -7,7 +7,7 @@
 #
 # 它会做：
 #   1. 检查本地现成插件包（local-packages/）及其 SHA-256
-#   2. clone 官方 OpenWrt（OPENWRT_REF，默认 openwrt-25.12）
+#   2. clone 官方 OpenWrt（OPENWRT_REF，默认 v25.12.6）
 #   3. 注入 feed：packages/luci 官方源 + passwall(两个) + timecontrol
 #      + softethervpn + 本仓库 package/ 作为 src-link custom feed + Argon 主题
 #   4. 把 seed.config 写成 .config，把 files/ 拷成 rootfs overlay，
@@ -39,7 +39,7 @@ usage() {
   ./build.sh --build  准备 + make + 构建后验收（GitHub Actions 用这条）
 
 可用环境变量：
-  OPENWRT_REF   官方 OpenWrt 的分支或 tag，默认 openwrt-25.12
+  OPENWRT_REF   官方 OpenWrt 的分支或 tag，默认 v25.12.6
   OPENWRT_DIR   源码树位置，默认 <仓库目录>/openwrt
   JOBS          make -j 的并行度，默认 nproc
   OPENWRT_DL_DIR / OPENWRT_CCACHE_DIR
@@ -155,9 +155,9 @@ EOF
 OPENWRT_REPO="${OPENWRT_REPO:-https://github.com/openwrt/openwrt.git}"
 # 25.12+ 才是 apk 包管理 + ucode/JS 版 LuCI。不要用更老的稳定分支：
 # 本仓库的 wrapper 包和 .apk 都是按 25.12 的规则写的。
-# 这里用**发行分支**而不是 master，构建才可复现；想要某个点版本就传 tag，
-# 例如 OPENWRT_REF=v25.12.6 ./build.sh
-OPENWRT_REF="${OPENWRT_REF:-openwrt-25.12}"
+# 固定到发行 tag 而不是分支/master：分支会随上游移动，tag 不会，构建才可复现。
+# 想临时换版本：OPENWRT_REF=v25.12.5 ./build.sh
+OPENWRT_REF="${OPENWRT_REF:-v25.12.6}"
 OPENWRT_DIR="${OPENWRT_DIR:-${SCRIPT_DIR}/openwrt}"
 JOBS="${JOBS:-$(nproc)}"
 
@@ -178,6 +178,13 @@ TIMECONTROL_FEED_URL="https://github.com/sirpdboy/luci-app-timecontrol.git"
 # SoftEther 的 LuCI 管理页（自带服务脚本、配置持久化、Flush、sysupgrade 保留清单）
 SOFTETHER_FEED_NAME="softethervpn"
 SOFTETHER_FEED_URL="https://github.com/yujun-1982/luci-app-softethervpn.git"
+
+# Vantage 主题（anothaDev/luci-theme-vantage）：仓库根下有两个包目录
+# （luci-theme-vantage / luci-app-vantage），跟 Argon 不同，能当标准 feed 用。
+# 固定到 v1.0.19 tag —— 和设备上验证过的 1.0.19-r1 一致。
+VANTAGE_FEED_NAME="vantage"
+VANTAGE_FEED_URL="https://github.com/anothaDev/luci-theme-vantage.git"
+VANTAGE_FEED_REF="v1.0.19"
 
 # 本仓库 package/ 目录里的包，以 src-link feed 暴露出去
 CUSTOM_FEED_NAME="custom"
@@ -261,7 +268,7 @@ fi
 step "Step 2: feeds"
 cd "${OPENWRT_DIR}"
 
-for f in "${PASSWALL_FEED_NAME}" "${PASSWALL_PKG_FEED_NAME}" "${TIMECONTROL_FEED_NAME}" "${SOFTETHER_FEED_NAME}"; do
+for f in "${PASSWALL_FEED_NAME}" "${PASSWALL_PKG_FEED_NAME}" "${TIMECONTROL_FEED_NAME}" "${SOFTETHER_FEED_NAME}" "${VANTAGE_FEED_NAME}"; do
 	sed -i "/^src-git[^ ]* ${f} /d" feeds.conf.default
 done
 sed -i "/^src-link[^ ]* ${CUSTOM_FEED_NAME} /d" feeds.conf.default
@@ -271,6 +278,8 @@ echo "src-git ${PASSWALL_FEED_NAME} ${PASSWALL_FEED_URL}"                       
 echo "src-git ${PASSWALL_PKG_FEED_NAME} ${PASSWALL_PKG_FEED_URL}"              >> feeds.conf.default
 echo "src-git ${TIMECONTROL_FEED_NAME} ${TIMECONTROL_FEED_URL}"                >> feeds.conf.default
 echo "src-git ${SOFTETHER_FEED_NAME} ${SOFTETHER_FEED_URL}"                    >> feeds.conf.default
+# Vantage 用 ^tag 钉版本：scripts/feeds 会把 feed 检出到该 tag，跟 OPENWRT_REF 一样可复现
+echo "src-git ${VANTAGE_FEED_NAME} ${VANTAGE_FEED_URL}^${VANTAGE_FEED_REF}"   >> feeds.conf.default
 echo "src-link ${CUSTOM_FEED_NAME} ${SCRIPT_DIR}/package"                      >> feeds.conf.default
 
 mkdir -p package/feeds/argon
@@ -305,6 +314,7 @@ problem=$(./scripts/feeds install -a 2>&1 | grep -i 'ignoring' || true)
 # 关键包必须真的进到包树里，缺一个就说明上游目录结构或 feed 名字变了
 for pair in "passwall:luci-app-passwall" "timecontrol:luci-app-timecontrol" \
             "softethervpn:luci-app-softethervpn" \
+            "vantage:luci-theme-vantage" "vantage:luci-app-vantage" \
             "custom:luci-app-openclash" "custom:ninjadesktop-lite"; do
 	feed=${pair%%:*}; pkg=${pair##*:}
 	if [ ! -f "package/feeds/${feed}/${pkg}/Makefile" ]; then

@@ -10,6 +10,7 @@ OpenWrt **25.12** x86/64 定制固件的构建配置仓库。官方 OpenWrt 源�
 - 参考 [yujun-1982/OpenWrt](https://github.com/yujun-1982/OpenWrt)（`local-packages/` + Actions 手动触发）
 - **`luci-app-openclash-1.0.0-r1.apk` 与 `ninjadesktop-lite-1.0.4-x86_64.apk` 在编译完成后就已经装上**，不再有首次开机安装的 uci-defaults 脚本
 - SoftEther 的 LuCI 页面改用外部 feed：`src-git softethervpn https://github.com/yujun-1982/luci-app-softethervpn.git`
+- Vantage 主题走标准 feed：`src-git vantage https://github.com/anothaDev/luci-theme-vantage.git^v1.0.19`，默认主题设为 Vantage（Argon 仍装着，随时可切回）
 - 逐条核实预置包的依赖在当前分支的真实包名（结论见下）
 
 一条本地命令即可编译，也可以只在 GitHub Actions 上手动触发，两边跑的是同一个 `build.sh`。
@@ -67,7 +68,7 @@ openwrt/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.img.gz
 ## 2. GitHub Actions 手动编译
 
 1. **Actions** → **Build OpenWrt x86_64 BIOS** → **Run workflow**
-2. `openwrt_ref` 保持 `openwrt-25.12`（或选某个 tag），`jobs` 保持 `3`
+2. `openwrt_ref` 保持 `v25.12.6`（默认值，可换其它 tag），`jobs` 保持 `3`
 3. 跑完下载 artifact：镜像、`.manifest`、`.buildinfo`、最终 `.config`、日志、SHA-256
 
 工作流**只有手动触发**：这套固件依赖 `local-packages/` 里的两个包，缺包时 `build.sh`
@@ -238,7 +239,7 @@ Kconfig 对"名字不存在"和"依赖没满足"的符号是**静默丢弃**的�
 
 | 项 | 值 |
 |---|---|
-| OpenWrt | `openwrt-25.12` 分支（可选 tag，如 `v25.12.6`）；apk 包管理 + ucode/JS LuCI |
+| OpenWrt | `v25.12.6`（release tag，可用 `OPENWRT_REF` 覆盖）；apk 包管理 + ucode/JS LuCI |
 | 架构 | x86/64 generic |
 | Rootfs | squashfs（只读 + overlayfs journaling） |
 | 分区 | Kernel 256 MiB / Rootfs 1024 MiB |
@@ -246,7 +247,7 @@ Kconfig 对"名字不存在"和"依赖没满足"的符号是**静默丢弃**的�
 | 镜像格式 | 只出 gzip 压缩的 `.img.gz`（不出 ext4 / EFI / VDI / VMDK） |
 | LAN | `br-lan` 桥（仅 `eth0`）静态 `10.10.10.2/24`；镜像**不预创建** `tap_eth0`，见 §7 |
 | root 密码 | **空**（Web 直接进；SSH 密码登录会被 dropbear 拒绝） |
-| 主题/语言 | Argon + Argon 设置页；简体中文（靠 `CONFIG_LUCI_LANG_zh_Hans=y` 点亮） |
+| 主题/语言 | Vantage（默认）+ Argon（装着，可在 系统 → 系统 里切回）+ Vantage 仪表盘；简体中文（靠 `CONFIG_LUCI_LANG_zh_Hans=y` 点亮） |
 | 分流 | nftables 软件分流开启，硬件分流关闭 |
 | 预置插件 | 编译期装入，见 §4 |
 
@@ -255,6 +256,7 @@ Kconfig 对"名字不存在"和"依赖没满足"的符号是**静默丢弃**的�
 | 组件 | 来源 | 说明 |
 |---|---|---|
 | `luci-theme-argon` / `luci-app-argon-config` | `jerrykuku/*` | 单包仓库，**不能**当 feed 注册，`build.sh` 直接 clone 到 `package/feeds/argon/` |
+| `luci-theme-vantage` / `luci-app-vantage` | `anothaDev/luci-theme-vantage`（feed 名 `vantage`，钉 `v1.0.19`） | 仓库根下有两个包目录，可当标准 feed；主题提供 `/luci-static/vantage`，应用是 `admin/dashboard` 的实时网络概览，依赖 `rpcd-mod-iwinfo` / `rpcd-mod-ucode` / `ucode-mod-*` |
 | `luci-app-passwall` | `xiaorouji/luci-app-passwall` + `xiaorouji/openwrt-passwall-packages` | 需要两个 feed |
 | `luci-app-timecontrol` | `sirpdboy/luci-app-timecontrol` | 上网时间控制；需要 `99-custom-menu-parents.json` 补 `admin/control` 父节点 |
 | `luci-app-softethervpn` | `src-git softethervpn https://github.com/yujun-1982/luci-app-softethervpn.git` | SoftEther 服务控制页 + 自己的 init 脚本、配置持久化、300 秒自动保存压缩、关机 Flush、sysupgrade 保留清单；postinst 会把上游 `/etc/init.d/softethervpnserver` 关掉，避免两个脚本抢同一个 `vpnserver` |
@@ -321,7 +323,7 @@ vpnserver。要起服务请用 `/etc/init.d/softethervpn start` 或 LuCI 的 **V
 ## 10. 已知限制（先看这里，别当 bug 报）
 
 1. **真机进度（截至本次修改）**：准备阶段已在 Ubuntu 24.04.5（8 核 / 9 GB / 4 GB swap）
-   跑通——clone `openwrt-25.12`、5 个 feed 全部解析、Argon 两处 clone、`make defconfig`
+   跑通——clone `v25.12.6`、6 个 feed 全部解析、Argon 两处 clone、`make defconfig`
    成功、`verify-config.sh` 全绿（**seed.config 69 条赋值零丢弃、7 个简体中文包点亮、
    `luci-app-openclash` 与 `ninjadesktop-lite` 2/2 选中**）。完整编译在进行中；
    **仍未被真实执行过的是 `apk extract` 解包、镜像组装后的 rootfs 装入、以及刷机后 Lua 界面**。
