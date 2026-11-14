@@ -1,0 +1,942 @@
+#!/bin/sh
+# ============================================================================
+# luci-app-appmanager backend
+#
+# 负责：
+#   - 读取 /etc/appmanager/config（设备、应用、OpenClash 路径）
+#   - 生成 AND(源 IP, 目标域名/IP) 规则块
+#   - 同时写入 OpenClash 自定义规则文件与运行配置，保证重建不丢、快速启动生效
+#   - 调用 /etc/init.d/openclash restart
+#
+# 规则块带 marker，重复执行幂等；每次修改前备份到 /etc/appmanager/backup。
+#
+# 用法：
+#   appmanager status
+#   appmanager apply '<spec>'
+#   appmanager preview '<spec>'
+#   appmanager doctor
+#   appmanager restart
+#
+# spec 是逐行 key value 文本，和 /etc/appmanager/config 同格式：
+#   enabled 1
+#   runtime /etc/openclash/次元.yaml
+#   custom /etc/openclash/custom/openclash_custom_rules.list
+#   enforce_china_ip 1
+#   device 10.10.10.27|客厅电视|taobao,hongguo
+#   app custom_xxx|自定义应用|example.com,ip:1.2.3.0/24
+# ============================================================================
+set -u
+umask 022
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+CONFIG_FILE=/etc/appmanager/config
+APPS_FILE=/usr/share/appmanager/apps.tsv
+BACKUP_DIR=/etc/appmanager/backup
+RESTART_FLAG=/var/run/appmanager.restarting
+RESTART_LOG=/tmp/appmanager-restart.log
+RESTART_STATUS=/tmp/appmanager-restart.status
+LOCK_DIR=/var/run/appmanager.lock
+DEFAULT_RUNTIME=/etc/openclash/次元.yaml
+DEFAULT_CUSTOM=/etc/openclash/custom/openclash_custom_rules.list
+BEGIN_MARK="# >>> appmanager:begin >>>"
+END_MARK="# <<< appmanager:end <<<"
+VERSION=1.0.0
+
+ENABLED=0
+RUNTIME=$DEFAULT_RUNTIME
+CUSTOM=$DEFAULT_CUSTOM
+ENFORCE=1
+LAST_APPLY=""
+DEV_LINES=""
+CUSTOM_APP_LINES=""
+RULES_TOTAL=0
+LOCK_HELD=0
+TMP_FILES=""
+
+log() { printf '%s\n' "$*"; }
+warn() { printf 'warning %s\n' "$*" >&2; }
+die() { printf 'ERROR %s\n' "$*" >&2; exit 1; }
+
+usage() {
+	cat <<'EOF'
+用法:
+  appmanager status
+  appmanager apply '<spec>'
+  appmanager preview '<spec>'
+  appmanager doctor
+  appmanager restart
+EOF
+}
+
+cleanup() {
+	[ "$LOCK_HELD" = 1 ] && rm -rf "$LOCK_DIR"
+	for f in $TMP_FILES; do
+		[ -n "$f" ] && rm -f "$f"
+	done
+}
+trap cleanup EXIT INT TERM
+
+TMP_SEQ=0
+TMP_PATH=""
+new_tmp() {
+	TMP_SEQ=$((TMP_SEQ + 1))
+	TMP_PATH="/tmp/appmanager.$$.$TMP_SEQ"
+	: > "$TMP_PATH" || die "无法创建临时文件: $TMP_PATH"
+	TMP_FILES="$TMP_FILES $TMP_PATH"
+}
+
+append_line() {
+	# $1 = current value, $2 = new line
+	if [ -z "$1" ]; then
+		printf '%s' "$2"
+	else
+		printf '%s\n%s' "$1" "$2"
+	fi
+}
+
+load_config() {
+	ENABLED=0
+	RUNTIME=$DEFAULT_RUNTIME
+	CUSTOM=$DEFAULT_CUSTOM
+	ENFORCE=1
+	LAST_APPLY=""
+	DEV_LINES=""
+	CUSTOM_APP_LINES=""
+
+	[ -f "$CONFIG_FILE" ] || return 0
+	while IFS= read -r line || [ -n "$line" ]; do
+		case "$line" in
+			''|'#'*) continue ;;
+		esac
+		key=${line%% *}
+		if [ "$key" = "$line" ]; then
+			val=""
+		else
+			val=${line#* }
+		fi
+		case "$key" in
+			enabled) case "$val" in 0|1) ENABLED=$val ;; esac ;;
+			runtime) [ -n "$val" ] && RUNTIME=$val ;;
+			custom) [ -n "$val" ] && CUSTOM=$val ;;
+			enforce_china_ip) case "$val" in 0|1) ENFORCE=$val ;; esac ;;
+			last_apply) LAST_APPLY=$val ;;
+			device) DEV_LINES=$(append_line "$DEV_LINES" "$val") ;;
+			app) CUSTOM_APP_LINES=$(append_line "$CUSTOM_APP_LINES" "$val") ;;
+		esac
+	done < "$CONFIG_FILE"
+	return 0
+}
+
+parse_spec() {
+	spec=$1
+	ENABLED=0
+	RUNTIME=$DEFAULT_RUNTIME
+	CUSTOM=$DEFAULT_CUSTOM
+	ENFORCE=1
+	LAST_APPLY=""
+	DEV_LINES=""
+	CUSTOM_APP_LINES=""
+
+	new_tmp; f=$TMP_PATH
+	printf '%s\n' "$spec" | tr -d '\r' > "$f"
+	while IFS= read -r line || [ -n "$line" ]; do
+		case "$line" in
+			''|'#'*) continue ;;
+		esac
+		key=${line%% *}
+		if [ "$key" = "$line" ]; then
+			val=""
+		else
+			val=${line#* }
+		fi
+		case "$key" in
+			enabled) [ "$val" = 0 ] || [ "$val" = 1 ] && ENABLED=$val ;;
+			runtime) [ -n "$val" ] && RUNTIME=$val ;;
+			custom) [ -n "$val" ] && CUSTOM=$val ;;
+			enforce_china_ip) [ "$val" = 0 ] || [ "$val" = 1 ] && ENFORCE=$val ;;
+			device) DEV_LINES=$(append_line "$DEV_LINES" "$val") ;;
+			app) CUSTOM_APP_LINES=$(append_line "$CUSTOM_APP_LINES" "$val") ;;
+		esac
+	done < "$f"
+}
+
+valid_ipv4() {
+	case "$1" in
+		''|*[!0-9.]*|.*|*.|*..*) return 1 ;;
+	esac
+	printf '%s\n' "$1" | awk -F. '
+		NF != 4 { exit 1 }
+		{
+			for (i = 1; i <= 4; i++) {
+				if ($i == "" || $i !~ /^[0-9]+$/) exit 1
+				if ($i ~ /^0[0-9]/) exit 1
+				if (($i + 0) < 0 || ($i + 0) > 255) exit 1
+			}
+		}
+	'
+}
+
+normalize_cidr() {
+	in=$1
+	case "$in" in
+		*/*)
+			ip=${in%%/*}
+			pfx=${in#*/}
+			;;
+		*)
+			ip=$in
+			pfx=32
+			;;
+	esac
+	valid_ipv4 "$ip" || return 1
+	case "$pfx" in
+		0|[1-9]|[12][0-9]|3[0-2]) ;;
+		*) return 1 ;;
+	esac
+	printf '%s/%s' "$ip" "$pfx"
+}
+
+# 返回规范化后的域名 / ip:CIDR；非法返回 1。
+normalize_target() {
+	in=$1
+	case "$in" in
+		ip:*)
+			cidr=$(normalize_cidr "${in#ip:}") || return 1
+			printf 'ip:%s' "$cidr"
+			return 0
+			;;
+		wildcard:*)
+			p=$(printf '%s' "${in#wildcard:}" | tr 'A-Z' 'a-z')
+			case "$p" in
+				''|*[!a-z0-9.*-]*|.*|*.|*..*|*.-*|*-.*) return 1 ;;
+			esac
+			case "$p" in
+				*.*) ;;
+				*) return 1 ;;
+			esac
+			[ ${#p} -le 253 ] || return 1
+			# 不允许通配到微信/QQ 核心域名
+			case "$p" in
+				*qq.com|*weixin.qq.com|*wechat.com|*wx.qq.com|*weixinbridge.com|*weixin.com) return 1 ;;
+			esac
+			printf 'wildcard:%s' "$p"
+			return 0
+			;;
+	esac
+	d=$(printf '%s' "$in" | tr 'A-Z' 'a-z')
+	d=${d#\*.}
+	d=${d#.}
+	case "$d" in
+		''|*[!a-z0-9.-]*|.*|*.|*..*|*.-*|*-.*) return 1 ;;
+	esac
+	case "$d" in
+		*.*) ;;
+		*) return 1 ;;
+	esac
+	[ ${#d} -le 253 ] || return 1
+	printf '%s\n' "$d" | awk -F. '
+		NF < 2 { exit 1 }
+		{ for (i = 1; i <= NF; i++) if ($i !~ /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/) exit 1 }
+	' || return 1
+	# 微信 / QQ 核心域名绝不进入规则。视频号专用子域不在此列。
+	case "$d" in
+		qq.com|weixin.qq.com|wechat.com|wx.qq.com|weixinbridge.com|weixin.com)
+			return 1
+			;;
+	esac
+	printf '%s' "$d"
+}
+
+sanitize_name() {
+	printf '%s' "$1" | tr -d '|\r\n\t' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+validate_path() {
+	case "$1" in
+		/etc/openclash/*) ;;
+		*) return 1 ;;
+	esac
+	case "$1" in
+		*..*) return 1 ;;
+	esac
+	return 0
+}
+
+# 把逗号分隔的 targets 规范化、去重，输出逗号分隔列表。
+normalize_target_list() {
+	in=$1
+	out=""
+	oldifs=$IFS
+	IFS=','
+	for raw in $in; do
+		IFS=$oldifs
+		raw=$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+		[ -n "$raw" ] || { IFS=','; continue; }
+		t=$(normalize_target "$raw") || return 1
+		case ",$out," in
+			*",$t,"*) ;;
+			*) out=$(append_line "$out" "$t" | tr '\n' ',') ;;
+		esac
+		IFS=','
+	done
+	IFS=$oldifs
+	printf '%s' "$out"
+}
+
+build_app_table() {
+	# 系统应用库
+	[ -f "$APPS_FILE" ] || die "应用库不存在: $APPS_FILE"
+	new_tmp; ALL_APPS=$TMP_PATH
+	: > "$ALL_APPS"
+
+	while IFS='|' read -r id name targets note || [ -n "$id" ]; do
+		case "$id" in
+			''|'#'*) continue ;;
+		esac
+		[ -n "$name" ] || die "应用库格式错误: $id 缺少名称"
+		nt=$(normalize_target_list "$targets") || die "应用 $id 的域名/IP 格式错误"
+		[ -n "$nt" ] || die "应用 $id 没有有效域名"
+		printf '%s|%s|%s\n' "$id" "$name" "$nt" >> "$ALL_APPS"
+	done < "$APPS_FILE"
+
+	# 自定义应用（来自页面）
+	if [ -n "$CUSTOM_APP_LINES" ]; then
+		new_tmp; f=$TMP_PATH
+		printf '%s\n' "$CUSTOM_APP_LINES" > "$f"
+		while IFS= read -r line || [ -n "$line" ]; do
+			[ -n "$line" ] || continue
+			case "$line" in
+				*"|"*"|"*) ;;
+				*) die "自定义应用格式错误: $line" ;;
+			esac
+			id=${line%%|*}
+			rest=${line#*|}
+			# 名称本身允许包含 |，最后一个字段固定是 targets。
+			targets=${rest##*|}
+			name=${rest%|*}
+			case "$id" in
+				custom_[a-z0-9_]*) ;;
+				*) die "自定义应用 ID 非法: $id" ;;
+			esac
+			[ ${#id} -le 48 ] || die "自定义应用 ID 过长: $id"
+			name=$(sanitize_name "$name")
+			[ -n "$name" ] || die "自定义应用缺少名称"
+			grep -q "^$id|" "$ALL_APPS" && die "应用 ID 重复: $id"
+			nt=$(normalize_target_list "$targets") || die "应用 $name 的域名/IP 格式错误"
+			[ -n "$nt" ] || die "应用 $name 没有有效域名"
+			printf '%s|%s|%s\n' "$id" "$name" "$nt" >> "$ALL_APPS"
+		done < "$f"
+	fi
+
+	[ -s "$ALL_APPS" ] || die "应用库为空"
+}
+
+build_device_table() {
+	new_tmp; DEV_TMP=$TMP_PATH
+	: > "$DEV_TMP"
+	[ -n "$DEV_LINES" ] || return 0
+
+	new_tmp; f=$TMP_PATH
+	printf '%s\n' "$DEV_LINES" > "$f"
+	n=0
+	while IFS= read -r line || [ -n "$line" ]; do
+		[ -n "$line" ] || continue
+		case "$line" in
+			*"|"*"|"*) ;;
+			*) die "设备格式错误: $line" ;;
+		esac
+		n=$((n + 1))
+		[ "$n" -le 64 ] || die "设备数量超过 64 台"
+		rawip=${line%%|*}
+		rest=${line#*|}
+		# 名称本身允许包含 |，最后一个字段固定是 apps。
+		apps=${rest##*|}
+		name=${rest%|*}
+		cidr=$(normalize_cidr "$rawip") || die "设备 IP 格式错误: $rawip"
+		awk -F'|' -v c="$cidr" '$1 == c { found = 1 } END { exit found ? 0 : 1 }' "$DEV_TMP" \
+			&& die "设备 IP 重复: $cidr"
+		name=$(sanitize_name "$name")
+		[ -n "$name" ] || name="设备 $n"
+
+		napps=""
+		oldifs=$IFS
+		IFS=','
+		for a in $apps; do
+			IFS=$oldifs
+			[ -n "$a" ] || continue
+			grep -q "^$a|" "$ALL_APPS" || die "未知应用: $a"
+			case ",$napps," in
+				*",$a,"*) ;;
+				*) napps=$(append_line "$napps" "$a" | tr '\n' ',') ;;
+			esac
+			IFS=','
+		done
+		IFS=$oldifs
+		printf '%s|%s|%s\n' "$cidr" "$name" "$napps" >> "$DEV_TMP"
+	done < "$f"
+}
+
+# 生成规则块。$1 = 缩进，$2 = 输出文件。
+build_block() {
+	indent=$1
+	out=$2
+	: > "$out"
+	RULES_TOTAL=0
+
+	printf '%s%s\n' "$indent" "$BEGIN_MARK" >> "$out"
+	printf '%s# 由 LuCI「应用管理」生成，请勿手改；在页面里改设备/应用。\n' "$indent" >> "$out"
+	if [ "$ENABLED" = 1 ]; then
+		printf '%s# 规则在 = 封禁；规则被注释 = 放行。\n' "$indent" >> "$out"
+	else
+		printf '%s# 当前已停用：下列规则全部被注释，等同放行。\n' "$indent" >> "$out"
+	fi
+	printf '%s# 微信/QQ 核心域名不在本块内，微信聊天与朋友圈不受影响。\n' "$indent" >> "$out"
+
+	if [ -s "$DEV_TMP" ]; then
+		while IFS='|' read -r aid aname atargets || [ -n "$aid" ]; do
+			[ -n "$aid" ] || continue
+			ips=""
+			while IFS='|' read -r dip dname dapps || [ -n "$dip" ]; do
+				[ -n "$dip" ] || continue
+				case ",$dapps," in
+					*",$aid,"*) ips="$ips $dip" ;;
+				esac
+			done < "$DEV_TMP"
+			[ -n "$ips" ] || continue
+
+			ip_cond=""
+			ipn=0
+			for ip in $ips; do
+				if [ "$ipn" -eq 0 ]; then
+					ip_cond="SRC-IP-CIDR,$ip"
+				elif [ "$ipn" -eq 1 ]; then
+					ip_cond="OR,(($ip_cond),(SRC-IP-CIDR,$ip))"
+				else
+					ip_cond="${ip_cond%)},(SRC-IP-CIDR,$ip))"
+				fi
+				ipn=$((ipn + 1))
+			done
+
+			target_cond=""
+			tn=0
+			oldifs=$IFS
+			IFS=','
+			for t in $atargets; do
+				IFS=$oldifs
+				case "$t" in
+					ip:*) cond="IP-CIDR,${t#ip:}" ;;
+					wildcard:*) cond="DOMAIN-WILDCARD,${t#wildcard:}" ;;
+					*) cond="DOMAIN-SUFFIX,$t" ;;
+				esac
+				if [ "$tn" -eq 0 ]; then
+					target_cond=$cond
+				elif [ "$tn" -eq 1 ]; then
+					target_cond="OR,(($target_cond),($cond))"
+				else
+					target_cond="${target_cond%)},($cond))"
+				fi
+				tn=$((tn + 1))
+				IFS=','
+			done
+			IFS=$oldifs
+			[ -n "$target_cond" ] || continue
+
+			rule="AND,(($ip_cond),($target_cond)),REJECT"
+			printf '%s# %s (%s)\n' "$indent" "$aname" "$aid" >> "$out"
+			if [ "$ENABLED" = 1 ]; then
+				printf '%s- %s\n' "$indent" "$rule" >> "$out"
+			else
+				printf '%s# - %s\n' "$indent" "$rule" >> "$out"
+			fi
+			RULES_TOTAL=$((RULES_TOTAL + 1))
+		done < "$ALL_APPS"
+	fi
+
+	if [ "$RULES_TOTAL" -eq 0 ]; then
+		printf '%s# 尚未选择任何设备/应用。\n' "$indent" >> "$out"
+	fi
+	printf '%s%s\n' "$indent" "$END_MARK" >> "$out"
+}
+
+detect_indent() {
+	f=$1
+	[ -f "$f" ] || { printf '__DEFAULT__'; return 0; }
+
+	found=$(awk '
+		/^rules:[ \t]*(#.*)?$/ { inr = 1; next }
+		inr && /^[ \t]*-/ { match($0, /^[ \t]*/); printf "x%s\n", substr($0, 1, RLENGTH); found = 1; exit }
+		inr && /^[^ \t#]/ { exit }
+		END { if (!found) print "__NONE__" }
+	' "$f")
+
+	case "$found" in
+		x) printf '__EMPTY__'; return 0 ;;
+		x*) printf '%s' "${found#x}"; return 0 ;;
+	esac
+
+	found=$(awk '
+		/^[ \t]*-/ { match($0, /^[ \t]*/); printf "x%s\n", substr($0, 1, RLENGTH); found = 1; exit }
+		END { if (!found) print "__NONE__" }
+	' "$f")
+	case "$found" in
+		x) printf '__EMPTY__' ;;
+		x*) printf '%s' "${found#x}" ;;
+		*) printf '__DEFAULT__' ;;
+	esac
+}
+
+resolve_indent() {
+	v=$(detect_indent "$1")
+	case "$v" in
+		__EMPTY__) printf '' ;;
+		__DEFAULT__) printf '  ' ;;
+		*) printf '%s' "$v" ;;
+	esac
+}
+
+# 把文件里旧的 marker 块去掉，再把新块放在 rules: 之后（或列表顶部）。
+patch_to_temp() {
+	f=$1
+	blk=$2
+	require_rules=$3
+	out=$4
+
+	if [ ! -f "$f" ]; then
+		[ "$require_rules" = 1 ] && return 1
+		{ printf 'rules:\n'; cat "$blk"; } > "$out" || return 1
+		return 0
+	fi
+
+	if ! grep -q '^rules:' "$f"; then
+		[ "$require_rules" = 1 ] && return 1
+		if grep -qE '^[[:space:]]*-[[:space:]]' "$f"; then
+			# 纯规则列表（没有 rules: 键）
+			body="$out.body"
+			awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
+				index($0, b) { skip = 1; next }
+				skip { if (index($0, e)) skip = 0; next }
+				{ print }
+			' "$f" > "$body" || return 1
+			{ cat "$blk"; cat "$body"; } > "$out" || return 1
+			rm -f "$body"
+			return 0
+		fi
+		{ printf 'rules:\n'; cat "$blk"; } > "$out" || return 1
+		return 0
+	fi
+
+	# 不支持 rules: [非空内联列表]
+	if awk '
+		/^rules:[ \t]*\[/ {
+			if ($0 !~ /^rules:[ \t]*\[[ \t]*\][ \t]*$/) exit 1
+		}
+	' "$f"; then
+		:
+	else
+		return 1
+	fi
+
+	awk -v b="$BEGIN_MARK" -v e="$END_MARK" -v blk="$blk" '
+		function emit(   line) {
+			while ((getline line < blk) > 0) print line
+			close(blk)
+		}
+		BEGIN { inblk = 0; done = 0 }
+		{
+			if (index($0, b) > 0) { inblk = 1; next }
+			if (inblk) {
+				if (index($0, e) > 0) inblk = 0
+				next
+			}
+			if ($0 ~ /^rules:[ \t]*(#.*)?$/) {
+				if (!done) { print; emit(); done = 1 } else print
+				next
+			}
+			if ($0 ~ /^rules:[ \t]*\[[ \t]*\][ \t]*$/) {
+				if (!done) { print "rules:"; emit(); done = 1 }
+				next
+			}
+			print
+		}
+		END { if (!done) exit 4 }
+	' "$f" > "$out"
+}
+
+make_backup() {
+	ts=$(date '+%Y%m%d-%H%M%S')
+	dir="$BACKUP_DIR/$ts"
+	mkdir -p "$dir" || return 1
+	[ -f "$CUSTOM" ] && cp -p "$CUSTOM" "$dir/custom_rules.list" 2>/dev/null
+	[ -f "$RUNTIME" ] && cp -p "$RUNTIME" "$dir/runtime.yaml" 2>/dev/null
+	[ -f "$CONFIG_FILE" ] && cp -p "$CONFIG_FILE" "$dir/config" 2>/dev/null
+	i=0
+	for d in $(ls -1dt "$BACKUP_DIR"/* 2>/dev/null); do
+		i=$((i + 1))
+		[ "$i" -gt 20 ] && rm -rf "$d"
+	done
+	return 0
+}
+
+write_config() {
+	mkdir -p /etc/appmanager || return 1
+	tmp="$CONFIG_FILE.tmp.$$"
+	{
+		printf 'enabled %s\n' "$ENABLED"
+		printf 'runtime %s\n' "$RUNTIME"
+		printf 'custom %s\n' "$CUSTOM"
+		printf 'enforce_china_ip %s\n' "$ENFORCE"
+		[ -n "$LAST_APPLY" ] && printf 'last_apply %s\n' "$LAST_APPLY"
+		if [ -n "$DEV_LINES" ]; then
+			printf '%s\n' "$DEV_LINES" | while IFS= read -r d; do
+				[ -n "$d" ] && printf 'device %s\n' "$d"
+			done
+		fi
+		if [ -n "$CUSTOM_APP_LINES" ]; then
+			printf '%s\n' "$CUSTOM_APP_LINES" | while IFS= read -r a; do
+				[ -n "$a" ] && printf 'app %s\n' "$a"
+			done
+		fi
+	} > "$tmp" || return 1
+	chmod 644 "$tmp"
+	mv "$tmp" "$CONFIG_FILE"
+}
+
+apply_openclash_uci() {
+	command -v uci >/dev/null 2>&1 || return 1
+
+	# 自定义规则总开关。没有它，重建后的运行配置不会合并 custom rules。
+	cur=$(uci -q get openclash.config.enable_custom_clash_rules 2>/dev/null)
+	if [ "$cur" != 1 ]; then
+		uci set openclash.config.enable_custom_clash_rules=1 || return 1
+	fi
+
+	if [ "$ENFORCE" = 1 ]; then
+		cur=$(uci -q get openclash.config.china_ip_route 2>/dev/null)
+		if [ "$cur" != 0 ]; then
+			uci set openclash.config.china_ip_route=0 || return 1
+		fi
+	fi
+	uci commit openclash || return 1
+	return 0
+}
+
+start_restart() {
+	if [ ! -x /etc/init.d/openclash ]; then
+		warn "找不到 /etc/init.d/openclash，规则已写入但无法自动重启"
+		return 1
+	fi
+	: > "$RESTART_FLAG"
+	: > "$RESTART_STATUS"
+	if command -v nohup >/dev/null 2>&1; then
+		nohup /bin/sh -c '
+			/etc/init.d/openclash restart >"$1" 2>&1
+			rc=$?
+			printf "rc=%s\n" "$rc" > "$2"
+			rm -f "$3"
+		' sh "$RESTART_LOG" "$RESTART_STATUS" "$RESTART_FLAG" >/dev/null 2>&1 &
+	else
+		(
+			/etc/init.d/openclash restart >"$RESTART_LOG" 2>&1
+			rc=$?
+			printf 'rc=%s\n' "$rc" > "$RESTART_STATUS"
+			rm -f "$RESTART_FLAG"
+		) >/dev/null 2>&1 &
+	fi
+	return 0
+}
+
+acquire_lock() {
+	if mkdir "$LOCK_DIR" 2>/dev/null; then
+		printf '%s\n' "$$" > "$LOCK_DIR/pid"
+		LOCK_HELD=1
+		return 0
+	fi
+	pid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+		die "另一个应用管理操作正在进行（PID $pid）"
+	fi
+	rm -rf "$LOCK_DIR"
+	mkdir "$LOCK_DIR" 2>/dev/null || die "无法创建锁目录 $LOCK_DIR"
+	printf '%s\n' "$$" > "$LOCK_DIR/pid"
+	LOCK_HELD=1
+	return 0
+}
+
+validate_common() {
+	validate_path "$RUNTIME" || die "运行配置路径必须在 /etc/openclash/ 下: $RUNTIME"
+	validate_path "$CUSTOM" || die "自定义规则路径必须在 /etc/openclash/ 下: $CUSTOM"
+	[ "$RUNTIME" != "$CUSTOM" ] || die "运行配置与自定义规则不能是同一个文件"
+	[ -f "$RUNTIME" ] || die "运行配置不存在: $RUNTIME（请先在 OpenClash 启动一次）"
+	[ -f "$APPS_FILE" ] || die "应用库不存在: $APPS_FILE"
+}
+
+prepare() {
+	validate_common
+	build_app_table
+	build_device_table
+}
+
+count_block() {
+	f=$1
+	[ -f "$f" ] || { printf '0 0'; return 0; }
+	awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
+		index($0, b) { inblk = 1; next }
+		inblk && index($0, e) { inblk = 0; next }
+		inblk {
+			if ($0 ~ /^[ \t]*(# )?-[ \t]+AND,/) total++
+			if ($0 ~ /^[ \t]*-[ \t]+AND,/) active++
+		}
+		END { printf "%d %d", total + 0, active + 0 }
+	' "$f"
+}
+
+block_hash() {
+	f=$1
+	awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
+		index($0, b) { inblk = 1; next }
+		inblk && index($0, e) { inblk = 0; next }
+		inblk { print }
+	' "$f" | sed 's/^[[:space:]]*//' | md5sum | awk '{ print $1 }'
+}
+
+cmd_status() {
+	load_config
+	runtime_exists=0
+	custom_exists=0
+	openclash=0
+	restarting=0
+	china_ip_route=""
+	custom_rules_enabled=""
+	block_total=0
+	block_active=0
+	managed=0
+	custom_managed=0
+	runtime_managed=0
+	blocks_consistent=1
+
+	[ -f "$RUNTIME" ] && runtime_exists=1
+	[ -f "$CUSTOM" ] && custom_exists=1
+	pgrep -f '/etc/openclash/.*clash' >/dev/null 2>&1 && openclash=1
+	[ -f "$RESTART_FLAG" ] && restarting=1
+	command -v uci >/dev/null 2>&1 && {
+		china_ip_route=$(uci -q get openclash.config.china_ip_route 2>/dev/null)
+		custom_rules_enabled=$(uci -q get openclash.config.enable_custom_clash_rules 2>/dev/null)
+	}
+
+	if [ -f "$CUSTOM" ] && grep -q "appmanager:begin" "$CUSTOM" 2>/dev/null; then
+		managed=1
+		custom_managed=1
+		set -- $(count_block "$CUSTOM")
+		block_total=$1
+		block_active=$2
+	fi
+	if [ -f "$RUNTIME" ] && grep -q "appmanager:begin" "$RUNTIME" 2>/dev/null; then
+		managed=1
+		runtime_managed=1
+		if [ "$custom_managed" = 0 ]; then
+			set -- $(count_block "$RUNTIME")
+			block_total=$1
+			block_active=$2
+		fi
+	fi
+	if [ "$custom_managed" = 1 ] && [ "$runtime_managed" = 1 ]; then
+		c_hash=$(block_hash "$CUSTOM")
+		r_hash=$(block_hash "$RUNTIME")
+		[ "$c_hash" = "$r_hash" ] || blocks_consistent=0
+	fi
+
+	configured=0
+	[ -f "$CONFIG_FILE" ] && configured=1
+
+	printf 'ok 1\n'
+	printf 'version %s\n' "$VERSION"
+	printf 'configured %s\n' "$configured"
+	printf 'enabled %s\n' "$ENABLED"
+	printf 'runtime %s\n' "$RUNTIME"
+	printf 'runtime_exists %s\n' "$runtime_exists"
+	printf 'custom %s\n' "$CUSTOM"
+	printf 'custom_exists %s\n' "$custom_exists"
+	printf 'enforce_china_ip %s\n' "$ENFORCE"
+	printf 'china_ip_route %s\n' "${china_ip_route:-unknown}"
+	printf 'custom_rules_enabled %s\n' "${custom_rules_enabled:-unknown}"
+	printf 'openclash %s\n' "$openclash"
+	printf 'restarting %s\n' "$restarting"
+	printf 'managed %s\n' "$managed"
+	printf 'custom_managed %s\n' "$custom_managed"
+	printf 'runtime_managed %s\n' "$runtime_managed"
+	printf 'blocks_consistent %s\n' "$blocks_consistent"
+	printf 'rules %s\n' "$block_total"
+	printf 'active_rules %s\n' "$block_active"
+	printf 'last_apply %s\n' "$LAST_APPLY"
+	[ -f "$RESTART_STATUS" ] && printf 'restart_status %s\n' "$(cat "$RESTART_STATUS" 2>/dev/null)"
+
+	if [ -n "$DEV_LINES" ]; then
+		printf '%s\n' "$DEV_LINES" | while IFS= read -r d; do
+			[ -n "$d" ] && printf 'device %s\n' "$d"
+		done
+	fi
+	if [ -n "$CUSTOM_APP_LINES" ]; then
+		printf '%s\n' "$CUSTOM_APP_LINES" | while IFS= read -r a; do
+			[ -n "$a" ] && printf 'app %s\n' "$a"
+		done
+	fi
+
+	[ "$runtime_exists" = 0 ] && printf 'warning 运行配置不存在：%s\n' "$RUNTIME"
+	[ "$configured" = 0 ] && printf 'warning 尚未生成过配置，页面显示的设备可能未保存\n'
+	[ "$openclash" = 0 ] && printf 'warning OpenClash 当前未运行\n'
+	if [ "$custom_managed" = 0 ] && [ "$runtime_managed" = 1 ]; then
+		printf 'warning 只有运行配置里有规则块，自定义规则文件里没有；重建配置后规则会丢\n'
+	fi
+	if [ "$custom_managed" = 1 ] && [ "$runtime_managed" = 0 ]; then
+		printf 'warning 只有自定义规则文件里有规则块，运行配置里没有；快速启动可能不生效\n'
+	fi
+	if [ "$blocks_consistent" = 0 ]; then
+		printf 'warning 两个文件里的规则块不一致，请重新保存一次\n'
+	fi
+	if [ "$china_ip_route" = 1 ]; then
+		printf 'warning 绕过中国大陆 IP 仍开启，国内 App 流量不会进入内核，规则会失效\n'
+	elif [ -n "$china_ip_route" ] && [ "$china_ip_route" != 0 ]; then
+		printf 'warning 无法读取 china_ip_route（当前值：%s）\n' "$china_ip_route"
+	fi
+	if [ "$custom_rules_enabled" = 0 ]; then
+		printf 'warning OpenClash 自定义规则总开关未开启\n'
+	elif [ -n "$custom_rules_enabled" ] && [ "$custom_rules_enabled" != 1 ]; then
+		printf 'warning 无法读取 enable_custom_clash_rules（当前值：%s）\n' "$custom_rules_enabled"
+	fi
+	if [ "$ENABLED" = 1 ] && [ "$block_active" = 0 ]; then
+		printf 'warning 已启用管控，但当前没有有效的未注释规则\n'
+	fi
+	if [ "$ENABLED" = 1 ] && [ "$block_total" -gt 0 ] && [ "$block_active" -ne "$block_total" ]; then
+		printf 'warning 规则数与生效数不一致，可能有规则被手动注释\n'
+	fi
+	return 0
+}
+
+cmd_preview() {
+	parse_spec "$1"
+	validate_common
+	build_app_table
+	build_device_table
+	ind=$(resolve_indent "$RUNTIME")
+	new_tmp; blk=$TMP_PATH
+	build_block "$ind" "$blk" || die "生成规则失败"
+	cat "$blk"
+}
+
+cmd_apply() {
+	acquire_lock
+	parse_spec "$1"
+	prepare
+	make_backup || die "备份失败，已中止"
+	mkdir -p "$(dirname "$CUSTOM")" || die "无法创建自定义规则目录"
+
+	custom_ind=$(resolve_indent "$CUSTOM")
+	runtime_ind=$(resolve_indent "$RUNTIME")
+	new_tmp; blk_custom=$TMP_PATH
+	new_tmp; blk_runtime=$TMP_PATH
+	build_block "$custom_ind" "$blk_custom" || die "生成自定义规则失败"
+	build_block "$runtime_ind" "$blk_runtime" || die "生成运行规则失败"
+
+	new_tmp; new_custom=$TMP_PATH
+	new_tmp; new_runtime=$TMP_PATH
+	patch_to_temp "$CUSTOM" "$blk_custom" 0 "$new_custom" || die "写入自定义规则失败（文件格式可能不受支持）"
+	patch_to_temp "$RUNTIME" "$blk_runtime" 1 "$new_runtime" || die "写入运行配置失败（找不到 rules: 或格式不受支持）"
+
+	# 先确认两个临时文件都非空，再原子替换，避免只写成功一个。
+	[ -s "$new_custom" ] || die "生成的自定义规则为空"
+	[ -s "$new_runtime" ] || die "生成的运行配置为空"
+	chmod 644 "$new_custom" "$new_runtime"
+	mv "$new_custom" "$CUSTOM" || die "替换自定义规则失败"
+	mv "$new_runtime" "$RUNTIME" || die "替换运行配置失败"
+
+	LAST_APPLY=$(date '+%Y-%m-%d %H:%M:%S')
+	write_config || die "保存配置失败"
+	apply_openclash_uci || warn "OpenClash UCI 设置失败，请检查 enable_custom_clash_rules / china_ip_route"
+	restart_note="，OpenClash 正在重启"
+	start_restart || restart_note="，但未能自动重启，请手动执行 /etc/init.d/openclash restart"
+
+	if [ "$ENABLED" = 1 ]; then
+		log "OK 已启用：写入 ${RULES_TOTAL} 条规则${restart_note}"
+	else
+		log "OK 已停用：${RULES_TOTAL} 条规则已全部注释${restart_note}"
+	fi
+}
+
+cmd_doctor() {
+	load_config
+	printf '应用管理诊断 v%s\n' "$VERSION"
+	printf '\n[路径]\n'
+	printf '  运行配置: %s\n' "$RUNTIME"
+	printf '  自定义规则: %s\n' "$CUSTOM"
+	printf '  配置: %s\n' "$CONFIG_FILE"
+	printf '  应用库: %s\n' "$APPS_FILE"
+	printf '\n[检查]\n'
+
+	if [ -d /etc/openclash ]; then
+		printf '  [OK] /etc/openclash 存在\n'
+	else
+		printf '  [FAIL] /etc/openclash 不存在，请先安装 OpenClash\n'
+	fi
+	if [ -x /etc/init.d/openclash ]; then
+		printf '  [OK] OpenClash 初始化脚本可执行\n'
+	else
+		printf '  [FAIL] /etc/init.d/openclash 不可执行\n'
+	fi
+	if [ -f "$RUNTIME" ]; then
+		if grep -q '^rules:' "$RUNTIME"; then
+			printf '  [OK] 运行配置有 rules: 段\n'
+		else
+			printf '  [FAIL] 运行配置没有 rules: 段\n'
+		fi
+	else
+		printf '  [FAIL] 运行配置不存在\n'
+	fi
+	if [ -f "$CUSTOM" ]; then
+		printf '  [OK] 自定义规则文件存在\n'
+	else
+		printf '  [WARN] 自定义规则文件不存在，保存时会创建\n'
+	fi
+	if [ -f "$APPS_FILE" ]; then
+		printf '  [OK] 应用库存在（%s 个应用）\n' "$(grep -c '^[a-z]' "$APPS_FILE" 2>/dev/null)"
+	else
+		printf '  [FAIL] 应用库不存在\n'
+	fi
+	if command -v uci >/dev/null 2>&1; then
+		printf '  china_ip_route=%s（必须为 0）\n' "$(uci -q get openclash.config.china_ip_route 2>/dev/null)"
+		printf '  enable_custom_clash_rules=%s（必须为 1）\n' "$(uci -q get openclash.config.enable_custom_clash_rules 2>/dev/null)"
+	else
+		printf '  [FAIL] 找不到 uci\n'
+	fi
+	if pgrep -f '/etc/openclash/.*clash' >/dev/null 2>&1; then
+		printf '  [OK] OpenClash 内核正在运行\n'
+	else
+		printf '  [WARN] OpenClash 内核未运行\n'
+	fi
+	if [ -f "$RUNTIME" ] && grep -q '^sniffer:' "$RUNTIME"; then
+		printf '  [OK] 运行配置包含 sniffer 段\n'
+	else
+		printf '  [WARN] 未检测到 sniffer；直连 IP 的 App 可能拿不到域名，建议在 OpenClash 开启 Sniffer\n'
+	fi
+	printf '\n[备份]\n'
+	printf '  最近备份目录: %s\n' "$BACKUP_DIR"
+	[ -d "$BACKUP_DIR" ] && ls -1dt "$BACKUP_DIR"/* 2>/dev/null | head -n 5
+	return 0
+}
+
+cmd_restart() {
+	acquire_lock
+	start_restart || die "无法启动 OpenClash 重启"
+	log "OK 已触发 OpenClash 重启"
+}
+
+case "${1:-status}" in
+	status) cmd_status ;;
+	apply) [ $# -ge 2 ] || die "apply 需要 spec 参数"; cmd_apply "$2" ;;
+	preview) [ $# -ge 2 ] || die "preview 需要 spec 参数"; cmd_preview "$2" ;;
+	doctor) cmd_doctor ;;
+	restart) cmd_restart ;;
+	version) printf '%s\n' "$VERSION" ;;
+	-h|--help|help) usage ;;
+	*) usage; exit 2 ;;
+esac

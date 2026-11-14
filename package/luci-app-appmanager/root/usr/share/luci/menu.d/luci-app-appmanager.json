@@ -1,0 +1,13 @@
+{
+	"admin/control/appmanager": {
+		"title": "应用管理",
+		"order": 40,
+		"action": {
+			"type": "view",
+			"path": "appmanager/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-appmanager" ]
+		}
+	}
+}
