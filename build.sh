@@ -275,6 +275,11 @@ cd "${OPENWRT_DIR}"
 for f in "${PASSWALL_FEED_NAME}" "${PASSWALL_PKG_FEED_NAME}" "${TIMECONTROL_FEED_NAME}" "${SOFTETHER_FEED_NAME}" "${VANTAGE_FEED_NAME}"; do
 	sed -i "/^src-git[^ ]* ${f} /d" feeds.conf.default
 done
+# 旧版把 luci-app-appmanager 放在外部 feed；v1.0.1 起改成本仓库 package/。
+# 清掉旧 feed 行和目录，避免同名包和新 custom 包冲突。
+sed -i "/^src-git[^ ]* appmanager /d" feeds.conf.default
+rm -rf feeds/appmanager package/feeds/appmanager
+rm -f package/feeds/custom/luci-app-appmanager
 sed -i "/^src-link[^ ]* ${CUSTOM_FEED_NAME} /d" feeds.conf.default
 
 # 注意：这里刻意用本地路径，而不是 GitHub 地址，见文件头注释。
