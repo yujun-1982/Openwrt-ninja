@@ -180,17 +180,18 @@ SOFTETHER_FEED_NAME="softethervpn"
 SOFTETHER_FEED_URL="https://github.com/yujun-1982/luci-app-softethervpn.git"
 
 # 应用管理插件：按设备 IP + 应用生成 OpenClash/mihomo AND 规则。
-# 固定到 v1.0.0 tag，和插件仓库的初始发布版本保持一致；升级插件时改这里。
+# 固定到 v1.0.0 对应的 commit（不要写 tag 名：scripts/feeds 的浅克隆
+# 只把 tag 拉到 FETCH_HEAD，随后 checkout v1.0.0 会找不到 ref）。
 APPMANAGER_FEED_NAME="appmanager"
 APPMANAGER_FEED_URL="https://github.com/yujun-1982/luci-app-appmanager.git"
-APPMANAGER_FEED_REF="v1.0.0"
+APPMANAGER_FEED_REF="e4c1c69e51f753cd5f7b9f528f0ae1cb1264575c"
 
 # Vantage 主题（anothaDev/luci-theme-vantage）：仓库根下有两个包目录
 # （luci-theme-vantage / luci-app-vantage），跟 Argon 不同，能当标准 feed 用。
-# 固定到 v1.0.19 tag —— 和设备上验证过的 1.0.19-r1 一致。
+# 固定到 v1.0.19 对应的 commit（原因同上：浅克隆下 tag 名不可 checkout）。
 VANTAGE_FEED_NAME="vantage"
 VANTAGE_FEED_URL="https://github.com/anothaDev/luci-theme-vantage.git"
-VANTAGE_FEED_REF="v1.0.19"
+VANTAGE_FEED_REF="ed6be0a7c2fb836164ac0c2be9530ae5e2a21deb"
 
 # 本仓库 package/ 目录里的包，以 src-link feed 暴露出去
 CUSTOM_FEED_NAME="custom"
