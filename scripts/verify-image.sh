@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# verify-image.sh - 构建完成后断言：两个本地现成插件包**已经在镜像里装好了**
+# verify-image.sh - 构建完成后断言：两个本地现成插件包和源码插件 luci-app-appmanager
+# **已经在镜像里装好了**
 #
 # 这个仓库的核心要求是"编译完成即已安装，不在首次开机安装"，所以必须有一道
 # 客观验收，而不是等刷完机去 LuCI 里找。三道检查：
@@ -54,7 +55,7 @@ if [ "${#MANIFESTS[@]}" -eq 0 ]; then
 	echo "[error] 没有找到 .manifest，无法核对已安装包清单" >&2
 	status=1
 else
-	for pkg in luci-app-openclash ninjadesktop-lite; do
+	for pkg in luci-app-openclash ninjadesktop-lite luci-app-appmanager; do
 		if grep -hqw -- "${pkg}" "${MANIFESTS[@]}"; then
 			line=$(grep -hw -- "${pkg}" "${MANIFESTS[@]}" | head -1)
 			echo "    manifest 已包含: ${line}"
@@ -75,7 +76,7 @@ if [ "${#DBS[@]}" -eq 0 ]; then
 else
 	# 25.12 的 lib/apk/db/installed 是 ADB 二进制格式，只能做子串探测，
 	# 因此这一道只作旁证；权威判据是上面由该数据库直接导出的 manifest。
-	for pkg in luci-app-openclash ninjadesktop-lite; do
+	for pkg in luci-app-openclash ninjadesktop-lite luci-app-appmanager; do
 		if grep -aqF -- "${pkg}" "${DBS[0]}"; then
 			echo "    rootfs apk 数据库可探测到: ${pkg}"
 		else
@@ -102,7 +103,7 @@ fi
 if [ "${status}" -ne 0 ]; then
 	echo "[error] 验收未通过。不要刷这个镜像，先按上面的报错修 seed.config 或 Makefile" >&2
 else
-	echo "[ok] 验收通过：两个预置包与其依赖都在镜像内，首次开机不需要装任何东西"
+	echo "[ok] 验收通过：两个预置包、luci-app-appmanager 与其依赖都在镜像内，首次开机不需要装任何东西"
 fi
 
 exit ${status}

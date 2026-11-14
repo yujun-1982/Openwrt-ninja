@@ -10,6 +10,7 @@ OpenWrt **25.12** x86/64 定制固件的构建配置仓库。官方 OpenWrt 源�
 - 参考 [yujun-1982/OpenWrt](https://github.com/yujun-1982/OpenWrt)（`local-packages/` + Actions 手动触发）
 - **`luci-app-openclash-1.0.0-r1.apk` 与 `ninjadesktop-lite-1.0.4-x86_64.apk` 在编译完成后就已经装上**，不再有首次开机安装的 uci-defaults 脚本
 - SoftEther 的 LuCI 页面改用外部 feed：`src-git softethervpn https://github.com/yujun-1982/luci-app-softethervpn.git`
+- 应用管理插件走外部 feed：`src-git appmanager https://github.com/yujun-1982/luci-app-appmanager.git^v1.0.0`，`seed.config` 里已选 `CONFIG_PACKAGE_luci-app-appmanager=y`
 - Vantage 主题走标准 feed：`src-git vantage https://github.com/anothaDev/luci-theme-vantage.git^v1.0.19`，默认主题设为 Vantage（Argon 仍装着，随时可切回）
 - 逐条核实预置包的依赖在当前分支的真实包名（结论见下）
 
@@ -95,7 +96,7 @@ Openwrt-ninja/
 ├── local-packages/             两个现成插件包 + SHA256SUMS（必需，构建会校验）
 ├── scripts/
 │   ├── verify-config.sh        defconfig 后逐条断言符号没被静默丢弃
-│   ├── verify-image.sh         构建后断言两个包与其依赖真的在镜像里
+│   ├── verify-image.sh         构建后断言两个预置包、luci-app-appmanager 与其依赖真的在镜像里
 │   └── inspect-local-apks.sh   导出厂商包真实元数据（存档，不参与判定）
 ├── .gitattributes              脚本/overlay/Makefile 钉 LF，*.apk *.ipk 钉 binary（防 autocrlf 毁二进制）
 ├── .gitignore                  忽略 /openwrt/ 与 /artifacts/；local-packages/*.apk 故意入库
@@ -165,6 +166,25 @@ apk info | grep -E 'openclash|ninjadesktop'
 ls /etc/openclash/core /usr/bin/ninja-linux-amd64
 cat /tmp/uci-defaults-*.log            # 只剩 96-set-luci-ui，不再有装包脚本
 ```
+
+---
+
+### 4.1 应用管理插件（源码包，不是预编译）
+
+`luci-app-appmanager` 有完整源码，所以不走 `local-packages/`，而是作为普通 feed：
+
+```sh
+src-git appmanager https://github.com/yujun-1982/luci-app-appmanager.git^v1.0.0
+```
+
+`build.sh` 会：
+
+1. 把这一行追加到 `openwrt/feeds.conf.default`；
+2. `scripts/feeds update -a && scripts/feeds install -a`；
+3. 检查 `package/feeds/appmanager/luci-app-appmanager/Makefile` 是否存在；
+4. 按 `seed.config` 里的 `CONFIG_PACKAGE_luci-app-appmanager=y` 编入镜像。
+
+固定 `^v1.0.0` 是为了构建可复现；升级插件时改 `APPMANAGER_FEED_REF`，重新打 tag 并更新这里。
 
 ---
 
@@ -260,6 +280,7 @@ Kconfig 对"名字不存在"和"依赖没满足"的符号是**静默丢弃**的�
 | `luci-app-passwall` | `xiaorouji/luci-app-passwall` + `xiaorouji/openwrt-passwall-packages` | 需要两个 feed |
 | `luci-app-timecontrol` | `sirpdboy/luci-app-timecontrol` | 上网时间控制；需要 `99-custom-menu-parents.json` 补 `admin/control` 父节点 |
 | `luci-app-softethervpn` | `src-git softethervpn https://github.com/yujun-1982/luci-app-softethervpn.git` | SoftEther 服务控制页 + 自己的 init 脚本、配置持久化、300 秒自动保存压缩、关机 Flush、sysupgrade 保留清单；postinst 会把上游 `/etc/init.d/softethervpnserver` 关掉，避免两个脚本抢同一个 `vpnserver` |
+| `luci-app-appmanager` | `src-git appmanager https://github.com/yujun-1982/luci-app-appmanager.git^v1.0.0` | 按设备 IP + 应用生成 OpenClash/mihomo `AND` 规则；源码编入，编译期就带上，不靠首次开机安装 |
 | `softethervpn5-server` | 官方 packages feed | **服务端**。没有任何 LuCI 应用会拉它，必须显式勾选；`softethervpn5-client` 显式不装 |
 | WireGuard | 官方 feed | 只装 `kmod-wireguard` + `wireguard-tools` + `luci-proto-wireguard`，**不预置接口/密钥/规则**：私钥是站点级机密，而这个仓库是随公开分发配置的 |
 | `luci-app-openclash` | `local-packages/*.apk` → wrapper 重新打包 | 不含 mihomo 核心（包内 `etc/openclash/core/` 是空目录，首次使用需在页面里联网下载核心） |

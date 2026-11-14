@@ -63,6 +63,7 @@ CONFIG_PACKAGE_luci-app-argon-config=y
 CONFIG_PACKAGE_luci-app-passwall=y
 CONFIG_PACKAGE_luci-app-timecontrol=y
 CONFIG_PACKAGE_luci-app-softethervpn=y
+CONFIG_PACKAGE_luci-app-appmanager=y
 CONFIG_PACKAGE_softethervpn5-server=y
 
 CONFIG_PACKAGE_kmod-wireguard=y
