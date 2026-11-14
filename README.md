@@ -178,8 +178,7 @@ cat /tmp/uci-defaults-*.log            # 只剩 96-set-luci-ui，不再有装包
 package/luci-app-appmanager/
 ├── Makefile
 ├── htdocs/
-├── root/
-└── install.sh
+└── root/
 ```
 
 `package/` 本身通过 `src-link` 注册成 `custom` feed，`build.sh` 会：
