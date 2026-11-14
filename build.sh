@@ -320,6 +320,14 @@ done
 problem=$(./scripts/feeds install -a 2>&1 | grep -i 'ignoring' || true)
 [ -z "${problem}" ] || { error "feeds install 有问题：${problem}"; exit 1; }
 
+# 兜底：少数 OpenWrt 25.12 的 feeds 扫描会漏掉 src-link 里的新包。
+# 直接补 custom feed 的包链接，再让后续 defconfig 扫描 package/ 树。
+if [ ! -e package/feeds/custom/luci-app-appmanager/Makefile ]; then
+	mkdir -p package/feeds/custom
+	ln -sfn "${SCRIPT_DIR}/package/luci-app-appmanager" package/feeds/custom/luci-app-appmanager
+	warn "feeds 未安装 luci-app-appmanager，已手动补上 custom feed 链接"
+fi
+
 # 关键包必须真的进到包树里，缺一个就说明上游目录结构或 feed 名字变了
 for pair in "passwall:luci-app-passwall" "timecontrol:luci-app-timecontrol" \
             "softethervpn:luci-app-softethervpn" \
