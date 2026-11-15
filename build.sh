@@ -9,7 +9,7 @@
 #   1. 检查本地现成插件包（local-packages/）及其 SHA-256
 #   2. clone 官方 OpenWrt（OPENWRT_REF，默认 v25.12.6）
 #   3. 注入 feed：packages/luci 官方源 + passwall(两个) + timecontrol
-#      + softethervpn + 本仓库 package/ 作为 src-link custom feed + Argon 主题
+#      + softethervpn + appmanager + 本仓库 package/ 作为 src-link custom feed + Argon 主题
 #   4. 把 seed.config 写成 .config，把 files/ 拷成 rootfs overlay，
 #      并把 local-packages/ 软链进源码树（wrapper 包的 Makefile 按 $(TOPDIR)/local-packages 取包）
 #   5. make defconfig 展开依赖
@@ -179,9 +179,11 @@ TIMECONTROL_FEED_URL="https://github.com/sirpdboy/luci-app-timecontrol.git"
 SOFTETHER_FEED_NAME="softethervpn"
 SOFTETHER_FEED_URL="https://github.com/yujun-1982/luci-app-softethervpn.git"
 
-# 应用管理插件：源码直接放在本仓库 package/luci-app-appmanager，
-# 通过 custom src-link feed 编入；不再依赖外部 appmanager feed。
-# （外部 feed 的包扫描在部分 OpenWrt 25.12 环境会漏掉子目录包，改为自包含更稳。）
+# 应用管理插件：按设备 IP + 应用生成 OpenClash/mihomo AND 规则。
+# 外部 feed，固定到 v1.0.2 对应的 commit；不要写 tag 名，浅克隆下 tag 不可 checkout。
+APPMANAGER_FEED_NAME="appmanager"
+APPMANAGER_FEED_URL="https://github.com/yujun-1982/luci-app-appmanager.git"
+APPMANAGER_FEED_REF="c4f92ca57e5a206fd7b6b1c4fff032ed8a5a6eb1"
 
 # Vantage 主题（anothaDev/luci-theme-vantage）：仓库根下有两个包目录
 # （luci-theme-vantage / luci-app-vantage），跟 Argon 不同，能当标准 feed 用。
@@ -272,14 +274,9 @@ fi
 step "Step 2: feeds"
 cd "${OPENWRT_DIR}"
 
-for f in "${PASSWALL_FEED_NAME}" "${PASSWALL_PKG_FEED_NAME}" "${TIMECONTROL_FEED_NAME}" "${SOFTETHER_FEED_NAME}" "${VANTAGE_FEED_NAME}"; do
+for f in "${PASSWALL_FEED_NAME}" "${PASSWALL_PKG_FEED_NAME}" "${TIMECONTROL_FEED_NAME}" "${SOFTETHER_FEED_NAME}" "${APPMANAGER_FEED_NAME}" "${VANTAGE_FEED_NAME}"; do
 	sed -i "/^src-git[^ ]* ${f} /d" feeds.conf.default
 done
-# 旧版把 luci-app-appmanager 放在外部 feed；v1.0.1 起改成本仓库 package/。
-# 清掉旧 feed 行和目录，避免同名包和新 custom 包冲突。
-sed -i "/^src-git[^ ]* appmanager /d" feeds.conf.default
-rm -rf feeds/appmanager package/feeds/appmanager
-rm -f package/feeds/custom/luci-app-appmanager
 sed -i "/^src-link[^ ]* ${CUSTOM_FEED_NAME} /d" feeds.conf.default
 
 # 注意：这里刻意用本地路径，而不是 GitHub 地址，见文件头注释。
@@ -287,6 +284,7 @@ echo "src-git ${PASSWALL_FEED_NAME} ${PASSWALL_FEED_URL}"                       
 echo "src-git ${PASSWALL_PKG_FEED_NAME} ${PASSWALL_PKG_FEED_URL}"              >> feeds.conf.default
 echo "src-git ${TIMECONTROL_FEED_NAME} ${TIMECONTROL_FEED_URL}"                >> feeds.conf.default
 echo "src-git ${SOFTETHER_FEED_NAME} ${SOFTETHER_FEED_URL}"                    >> feeds.conf.default
+echo "src-git ${APPMANAGER_FEED_NAME} ${APPMANAGER_FEED_URL}^${APPMANAGER_FEED_REF}" >> feeds.conf.default
 # Vantage 用 ^commit 钉版本：scripts/feeds 的浅克隆无法 checkout tag 名
 echo "src-git ${VANTAGE_FEED_NAME} ${VANTAGE_FEED_URL}^${VANTAGE_FEED_REF}"   >> feeds.conf.default
 echo "src-link ${CUSTOM_FEED_NAME} ${SCRIPT_DIR}/package"                      >> feeds.conf.default
@@ -320,20 +318,12 @@ done
 problem=$(./scripts/feeds install -a 2>&1 | grep -i 'ignoring' || true)
 [ -z "${problem}" ] || { error "feeds install 有问题：${problem}"; exit 1; }
 
-# 兜底：少数 OpenWrt 25.12 的 feeds 扫描会漏掉 src-link 里的新包。
-# 直接补 custom feed 的包链接，再让后续 defconfig 扫描 package/ 树。
-if [ ! -e package/feeds/custom/luci-app-appmanager/Makefile ]; then
-	mkdir -p package/feeds/custom
-	ln -sfn "${SCRIPT_DIR}/package/luci-app-appmanager" package/feeds/custom/luci-app-appmanager
-	warn "feeds 未安装 luci-app-appmanager，已手动补上 custom feed 链接"
-fi
-
 # 关键包必须真的进到包树里，缺一个就说明上游目录结构或 feed 名字变了
 for pair in "passwall:luci-app-passwall" "timecontrol:luci-app-timecontrol" \
             "softethervpn:luci-app-softethervpn" \
+            "appmanager:luci-app-appmanager" \
             "vantage:luci-theme-vantage" "vantage:luci-app-vantage" \
-            "custom:luci-app-openclash" "custom:ninjadesktop-lite" \
-            "custom:luci-app-appmanager"; do
+            "custom:luci-app-openclash" "custom:ninjadesktop-lite"; do
 	feed=${pair%%:*}; pkg=${pair##*:}
 	if [ ! -f "package/feeds/${feed}/${pkg}/Makefile" ]; then
 		error "feed ${feed} 里找不到包 ${pkg} —— 上游目录结构可能变了"

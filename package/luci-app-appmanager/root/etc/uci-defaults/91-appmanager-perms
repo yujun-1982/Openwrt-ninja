@@ -1,4 +1,0 @@
-#!/bin/sh
-# 预置到固件时，包安装脚本可能不会执行；首次开机补一次可执行位。
-chmod 755 /usr/sbin/appmanager 2>/dev/null
-exit 0

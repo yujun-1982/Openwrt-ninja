@@ -1,7 +1,0 @@
-# 由 LuCI「应用管理」维护；也可以手工编辑后重启 OpenClash。
-# 页面保存时会原子重写本文件，并备份旧配置到 /etc/appmanager/backup/。
-enabled 0
-runtime /etc/openclash/次元.yaml
-custom /etc/openclash/custom/openclash_custom_rules.list
-enforce_china_ip 1
-device 10.10.10.27|设备 10.10.10.27|taobao,hongguo,xiaohongshu,tencentvideo,wechat_channels,iqiyi,xigua,fanqie,douyin

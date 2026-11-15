@@ -1,9 +1,0 @@
-taobao|淘宝|taobao.com,tmall.com,tbcdn.cn,taobaocdn.com,taobao.net|电商主站与静态资源（不含支付宝/阿里云）
-hongguo|红果|fqnovel.com,qznovelvod.com,fqnovelpic.com,wildcard:*novel*.byteimg.com|红果 API/视频/图片；图片通配覆盖 p3-novel.byteimg.com
-xiaohongshu|小红书|xiaohongshu.com,xhscdn.com,xhscdn.net,xhslink.com,xhsrcdn.com,rednote.com|小红书主站、图片与视频 CDN
-tencentvideo|腾讯视频|v.qq.com,vv.video.qq.com,v.video.qq.com,qqvideo.gtimg.com,v.smtcdns.com,pgdt.gtimg.cn,yoo.gtimg.com,v.streaming.qq.com|腾讯视频专用域名（不含 qq.com 主域，也不含泛 video.qq.com 以免误伤视频号）
-wechat_channels|微信视频号|channels.weixin.qq.com,finder.video.qq.com,mp.weixin.qq.com,servicewechat.com,wxapp.tc.qq.com|保留聊天/支付/朋友圈/视频通话；封视频号/公众号/小程序
-iqiyi|爱奇艺|iqiyi.com,iqiyipic.com,qiyi.com,qiyipic.com,qy.net,71.am,71edge.com,pps.tv,ppsimg.com,iq.com|爱奇艺主站、播放器与 CDN
-xigua|西瓜视频|ixigua.com,ixiguavideo.com,ixigua.net|西瓜视频主站与视频 CDN
-fanqie|番茄小说|fanqienovel.com,changdunovel.com|番茄小说主站与短链（与红果的字节 CDN 有部分重叠）
-douyin|抖音|douyin.com,douyinvod.com,douyinpic.com,douyincdn.com,douyinstatic.com,iesdouyin.com,amemv.com,amemv.cn,douyinact.com,douyinliving.com,douyinpay.com,douyinec.com|抖音主站、直播、电商与支付
